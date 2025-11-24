@@ -1,0 +1,44 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: kube-prometheus-stack
+  namespace: argocd       
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  source:
+    repoURL: https://prometheus-community.github.io/helm-charts
+    chart: kube-prometheus-stack
+    targetRevision: 65.2.0   
+    helm:
+      releaseName: kube-prometheus-stack
+      values: |
+        grafana:
+          enabled: true
+          service:
+            type: ClusterIP          
+          defaultDashboardsEnabled: true
+
+        prometheus:
+          prometheusSpec:
+            scrapeInterval: 15s
+            evaluationInterval: 15s
+
+        kubeProxy:
+          enabled: true
+
+        # nodeExporter, kube-state-metrics, etc. vienen ya por defecto
+        # puedes tunearlos aquí para tus pruebas
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring       
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

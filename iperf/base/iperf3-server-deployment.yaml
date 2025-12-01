@@ -1,0 +1,30 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: iperf3-server
+  namespace: iperf-test
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: iperf3-server
+  template:
+    metadata:
+      labels:
+        app: iperf3-server
+    spec:
+      containers:
+        - name: iperf3-server
+          image: networkstatic/iperf3:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - "-s"            # Modo servidor
+          ports:
+            - containerPort: 5201
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "1"
+              memory: "512Mi"

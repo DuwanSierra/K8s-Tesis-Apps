@@ -1,0 +1,30 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: iperf3-client
+  namespace: iperf-test
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: iperf3-client
+  template:
+    metadata:
+      labels:
+        app: iperf3-client
+    spec:
+      containers:
+        - name: iperf3-client
+          image: networkstatic/iperf3:latest
+          imagePullPolicy: IfNotPresent
+          # Dejamos el contenedor "vivo" y tú lanzas los tests a mano
+          command: ["/bin/sh", "-c"]
+          args:
+            - "sleep infinity"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "1"
+              memory: "512Mi"

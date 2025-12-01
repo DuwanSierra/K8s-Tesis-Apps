@@ -15,7 +15,7 @@ spec:
     spec:
       containers:
         - name: iperf3-client
-          image: networkstatic/iperf3:latest
+          image: docker.io/networkstatic/iperf3:latest
           imagePullPolicy: IfNotPresent
           # Dejamos el contenedor "vivo" y tú lanzas los tests a mano
           command: ["/bin/sh", "-c"]

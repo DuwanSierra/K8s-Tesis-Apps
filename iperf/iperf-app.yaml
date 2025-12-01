@@ -1,0 +1,20 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: iperf-test
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/DuwanSierra/K8s-Tesis-Apps.git
+    targetRevision: main
+    path: iperf/overlays/default
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: iperf-test
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

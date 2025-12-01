@@ -15,7 +15,7 @@ spec:
     spec:
       containers:
         - name: iperf3-server
-          image: networkstatic/iperf3:latest
+          image: docker.io/networkstatic/iperf3:latest
           imagePullPolicy: IfNotPresent
           args:
             - "-s"            # Modo servidor

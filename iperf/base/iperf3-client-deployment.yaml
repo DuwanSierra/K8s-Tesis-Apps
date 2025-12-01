@@ -17,7 +17,6 @@ spec:
         - name: iperf3-client
           image: docker.io/networkstatic/iperf3:latest
           imagePullPolicy: IfNotPresent
-          # Dejamos el contenedor "vivo" y tú lanzas los tests a mano
           command: ["/bin/sh", "-c"]
           args:
             - "sleep infinity"

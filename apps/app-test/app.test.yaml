@@ -9,6 +9,7 @@ spec:
     repoURL: https://github.com/DuwanSierra/K8s-Tesis-Apps.git
     targetRevision: main
     path: apps/app-test/overlays/default
+    kustomize: {}
   destination:
     server: https://kubernetes.default.svc
     namespace: iperf-test

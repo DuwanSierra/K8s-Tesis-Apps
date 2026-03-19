@@ -2,23 +2,23 @@ apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: kube-prometheus-stack
-  namespace: argocd       
-  finalizers:
-    - resources-finalizer.argocd.argoproj.io
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
 spec:
   project: default
-
   source:
     repoURL: https://prometheus-community.github.io/helm-charts
     chart: kube-prometheus-stack
-    targetRevision: 82.11.0  
+    targetRevision: 82.11.0
     helm:
       releaseName: kube-prometheus-stack
+      skipCrds: true
       values: |
         grafana:
           enabled: true
           service:
-            type: ClusterIP          
+            type: ClusterIP
           defaultDashboardsEnabled: true
 
         prometheus:
@@ -28,18 +28,15 @@ spec:
 
         kubeProxy:
           enabled: true
-
-        # nodeExporter, kube-state-metrics, etc. vienen ya por defecto
-        # puedes tunearlos aquí para tus pruebas
-
   destination:
     server: https://kubernetes.default.svc
-    namespace: monitoring       
-
+    namespace: monitoring
   syncPolicy:
     automated:
       prune: true
       selfHeal: true
     syncOptions:
+      - ServerSideApply=true
+      - ClientSideApplyMigration=false
       - CreateNamespace=true
-      #- ServerSideApply=true
+      - SkipDryRunOnMissingResource=true

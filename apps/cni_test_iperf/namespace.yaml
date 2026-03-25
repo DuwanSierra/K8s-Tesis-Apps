@@ -3,8 +3,8 @@ kind: Namespace
 metadata:
   name: cni-test
   annotations:
-    # ArgoCD: crear el Namespace antes que cualquier recurso namespaced
-    argocd.argoproj.io/sync-wave: "-1"
+    # ArgoCD: desplegar después de metrics (wave -1 = CRDs, wave 0 = stack, wave 2 = tests)
+    argocd.argoproj.io/sync-wave: "2"
   labels:
     app.kubernetes.io/part-of: cni-test
     purpose: network-benchmark

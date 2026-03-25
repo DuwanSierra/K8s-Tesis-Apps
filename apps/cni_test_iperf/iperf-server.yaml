@@ -9,6 +9,8 @@ kind: Deployment
 metadata:
   name: iperf3-server
   namespace: cni-test
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
   labels:
     app: iperf3-server
     component: network-benchmark
@@ -68,6 +70,8 @@ kind: Service
 metadata:
   name: iperf3-server
   namespace: cni-test
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
   labels:
     app: iperf3-server
     component: network-benchmark

@@ -26,6 +26,7 @@ metadata:
     component: network-benchmark
     app.kubernetes.io/part-of: cni-test
   annotations:
+    argocd.argoproj.io/sync-wave: "2"
     # Documentación: primera ejecución ocurre dentro de 10 min tras el deploy
     cni-test/description: "Prueba de throughput L3 con iperf3 – 5 min / intervalo 10 s / JSON"
 spec:

@@ -8,4 +8,4 @@ kind: Kustomization
 resources:
   - metrics/kube-prometheus-stack-crds.yaml
   - metrics/kube-prometheus-stack-app.yaml
-  - cni_test_iperf/application.yaml
+  #- cni_test_iperf/application.yaml

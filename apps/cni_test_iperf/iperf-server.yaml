@@ -1,0 +1,83 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# iperf3 Server – Deployment + Service
+#
+# El servidor escucha permanentemente en el puerto 5201 y acepta conexiones
+# de cualquier cliente iperf3 dentro del clúster.
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: iperf3-server
+  namespace: cni-test
+  labels:
+    app: iperf3-server
+    component: network-benchmark
+    app.kubernetes.io/part-of: cni-test
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: iperf3-server
+  template:
+    metadata:
+      labels:
+        app: iperf3-server
+        component: network-benchmark
+    spec:
+      # Evita que el Pod del servidor comparta nodo con el cliente,
+      # lo que fuerza tráfico inter-nodo por defecto.
+      # Quitar esta regla si se quiere medir intra-nodo.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: iperf3-client
+                topologyKey: "kubernetes.io/hostname"
+      containers:
+        - name: iperf3-server
+          image: networkstatic/iperf3:latest
+          # Modo servidor: escucha en puerto 5201, acepta múltiples conexiones
+          args: ["-s", "-p", "5201", "--forceflush"]
+          ports:
+            - name: iperf3-tcp
+              containerPort: 5201
+              protocol: TCP
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "64Mi"
+            limits:
+              cpu: "500m"
+              memory: "128Mi"
+          readinessProbe:
+            tcpSocket:
+              port: 5201
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 5201
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: iperf3-server
+  namespace: cni-test
+  labels:
+    app: iperf3-server
+    component: network-benchmark
+    app.kubernetes.io/part-of: cni-test
+spec:
+  selector:
+    app: iperf3-server
+  ports:
+    - name: iperf3-tcp
+      protocol: TCP
+      port: 5201
+      targetPort: 5201
+  type: ClusterIP

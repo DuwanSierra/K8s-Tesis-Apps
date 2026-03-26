@@ -4,14 +4,16 @@ metadata:
   name: cni-test-iperf
   namespace: argocd
   annotations:
-    # Wave 2: después de metrics (wave -1 = CRDs, wave 0 = stack)
+    # Wave 2: after metrics (wave -1 = CRDs, wave 0 = stack)
     argocd.argoproj.io/sync-wave: "2"
 spec:
   project: default
   source:
     repoURL: https://github.com/DuwanSierra/K8s-Tesis-Apps.git
     targetRevision: HEAD
-    path: apps/cni_test_iperf
+    # Keep workload manifests outside apps/ so parent App-of-Apps does not
+    # parse raw manifests/kustomization from child workloads.
+    path: cni_test_iperf
   destination:
     server: https://kubernetes.default.svc
     namespace: cni-test

@@ -1,68 +1,40 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# iperf3 Client – CronJob
+# Latency Client – CronJob
 #
-# Diseño: CronJob con schedule "*/10 * * * *" (cada 10 minutos).
-# Esto garantiza que el primer disparo ocurra dentro de los 10 minutos
-# posteriores a la instalación del app en ArgoCD, cumpliendo el requerimiento
-# de "ejecutarse a los 10 minutos".
-#
-# Parámetros de prueba (alineados con la metodología de la tesis):
-#   -t 300   → Duración: 5 minutos (300 s) de tráfico continuo
-#   -i 10    → Intervalo: muestra cada 10 s → 30 puntos de datos por ejecución
-#   -J       → Salida en formato JSON (para análisis posterior)
-#   -p 5201  → Puerto del servidor
-#
-# Para medir intra-nodo: eliminar el podAffinity de este manifiesto y del
-# servidor para que ambos caigan en el mismo nodo.
-# Para medir inter-nodo: mantener el podAntiAffinity del servidor (default).
+# Ejecuta una prueba de latencia (ICMP) contra el Service del servidor iperf3
+# y exporta resultados (raw + summary JSON) a un repositorio Git.
 # ─────────────────────────────────────────────────────────────────────────────
 apiVersion: batch/v1
 kind: CronJob
 metadata:
-  name: iperf3-client
+  name: latency-client
   namespace: cni-test
   labels:
-    app: iperf3-client
+    app: latency-client
     component: network-benchmark
     app.kubernetes.io/part-of: cni-test
   annotations:
     argocd.argoproj.io/sync-wave: "2"
-    # Documentación: primera ejecución ocurre dentro de 10 min tras el deploy
-    cni-test/description: "Prueba de throughput L3 con iperf3 – 5 min / intervalo 10 s / JSON"
+    cni-test/description: "Prueba de latencia ICMP con ping + exportación Git"
 spec:
-  # Disparo: cada 6 minutos.
-  # Primera ejecución garantizada dentro de los 6 min post-instalación.
-  # Para uso periódico en investigación se puede cambiar a "@hourly" o "0 */6 * * *".
-  schedule: "*/6 * * * *"
-
-  # Si el Job anterior todavía corre (p.ej. fallo de red) no lanzar otro en paralelo.
+  # Offset de 5 minutos respecto al cron de throughput (*/6).
+  # Si throughput inicia en minuto 0, la latencia corre en minuto 5.
+  schedule: "5-59/6 * * * *"
   concurrencyPolicy: Forbid
-
-  # Ventana máxima de retraso aceptable antes de cancelar el disparo perdido.
   startingDeadlineSeconds: 120
-
-  # Historial de Jobs para depuración (kubectl get jobs -n cni-test)
   successfulJobsHistoryLimit: 5
   failedJobsHistoryLimit: 3
-
   jobTemplate:
     spec:
-      # Sin reintentos automáticos; si falla se registra y se espera el próximo ciclo.
       backoffLimit: 1
-
-      # TTL: los Pods completados se limpian 1 hora después para no acumular basura.
       ttlSecondsAfterFinished: 3600
-
       template:
         metadata:
           labels:
-            app: iperf3-client
+            app: latency-client
             component: network-benchmark
         spec:
           restartPolicy: Never
-
-          # El cliente prefiere un nodo distinto al servidor para forzar inter-nodo.
-          # Quitar este bloque si se quiere medir intra-nodo.
           affinity:
             podAntiAffinity:
               preferredDuringSchedulingIgnoredDuringExecution:
@@ -72,8 +44,6 @@ spec:
                       matchLabels:
                         app: iperf3-server
                     topologyKey: "kubernetes.io/hostname"
-
-          # Esperar a que el servidor esté listo antes de iniciar la prueba.
           initContainers:
             - name: wait-for-server
               image: busybox:1.36
@@ -86,7 +56,7 @@ spec:
                     echo "[init] Servidor no disponible, reintentando en 5s...";
                     sleep 5;
                   done
-                  echo "[init] Servidor listo. Iniciando prueba."
+                  echo "[init] Servidor listo. Iniciando prueba de latencia."
               resources:
                 requests:
                   cpu: "10m"
@@ -94,9 +64,8 @@ spec:
                 limits:
                   cpu: "50m"
                   memory: "32Mi"
-
           containers:
-            - name: iperf3-client
+            - name: latency-client
               image: alpine:3.20
               command:
                 - sh
@@ -104,28 +73,52 @@ spec:
                 - |
                   set -eu
 
-                  apk add --no-cache iperf3 git ca-certificates >/dev/null
+                  apk add --no-cache iputils git ca-certificates >/dev/null
 
                   TS="$(date -u +%Y%m%dT%H%M%SZ)"
-                  OUTPUT_DIR="/tmp/results/iperf3"
-                  RESULT_FILE="${OUTPUT_DIR}/iperf3_${CNI_NAME}_${TS}.json"
-                  META_FILE="${OUTPUT_DIR}/iperf3_${CNI_NAME}_${TS}.meta"
+                  OUTPUT_DIR="/tmp/results/latency"
+                  RAW_FILE="${OUTPUT_DIR}/ping_${CNI_NAME}_${TS}.log"
+                  JSON_FILE="${OUTPUT_DIR}/ping_${CNI_NAME}_${TS}.json"
 
                   mkdir -p "${OUTPUT_DIR}"
 
-                  iperf3 \
-                    -c iperf3-server.cni-test.svc.cluster.local \
-                    -p 5201 \
-                    -t 300 \
-                    -i 10 \
-                    -J > "${RESULT_FILE}"
+                  ping -c 30 -i 1 -W 1 iperf3-server.cni-test.svc.cluster.local > "${RAW_FILE}"
 
-                  cat > "${META_FILE}" <<EOF
-                  timestamp_utc=${TS}
-                  benchmark_type=throughput_tcp
-                  cni_name=${CNI_NAME}
-                  namespace=cni-test
-                  source=cronjob/iperf3-client
+                  PACKETS_LINE="$(grep -E 'packets transmitted' "${RAW_FILE}" | tail -n1)"
+                  RTT_LINE="$(grep -E 'rtt min/avg/max' "${RAW_FILE}" | tail -n1 || true)"
+
+                  TX="$(echo "${PACKETS_LINE}" | awk '{print $1}')"
+                  RX="$(echo "${PACKETS_LINE}" | awk '{print $4}')"
+                  LOSS="$(echo "${PACKETS_LINE}" | awk -F', ' '{print $3}' | awk '{print $1}' | tr -d '%')"
+
+                  if [ -n "${RTT_LINE}" ]; then
+                    RTT_VALUES="$(echo "${RTT_LINE}" | awk -F'=' '{print $2}' | xargs)"
+                    RTT_MIN="$(echo "${RTT_VALUES}" | cut -d'/' -f1)"
+                    RTT_AVG="$(echo "${RTT_VALUES}" | cut -d'/' -f2)"
+                    RTT_MAX="$(echo "${RTT_VALUES}" | cut -d'/' -f3)"
+                    RTT_MDEV="$(echo "${RTT_VALUES}" | cut -d'/' -f4 | awk '{print $1}')"
+                  else
+                    RTT_MIN="null"
+                    RTT_AVG="null"
+                    RTT_MAX="null"
+                    RTT_MDEV="null"
+                  fi
+
+                  cat > "${JSON_FILE}" <<EOF
+                  {
+                    "timestamp_utc": "${TS}",
+                    "benchmark_type": "latency_icmp",
+                    "cni_name": "${CNI_NAME}",
+                    "namespace": "cni-test",
+                    "target": "iperf3-server.cni-test.svc.cluster.local",
+                    "packets_transmitted": ${TX},
+                    "packets_received": ${RX},
+                    "packet_loss_percent": ${LOSS},
+                    "rtt_min_ms": ${RTT_MIN},
+                    "rtt_avg_ms": ${RTT_AVG},
+                    "rtt_max_ms": ${RTT_MAX},
+                    "rtt_mdev_ms": ${RTT_MDEV}
+                  }
                   EOF
 
                   export GIT_TERMINAL_PROMPT=0
@@ -142,15 +135,15 @@ spec:
                   rm -rf /tmp/repo
                   git clone --depth 1 --branch "${GIT_BRANCH}" "${GIT_REPO_URL}" /tmp/repo
 
-                  mkdir -p "/tmp/repo/${GIT_RESULTS_PATH}/iperf3"
-                  cp "${RESULT_FILE}" "/tmp/repo/${GIT_RESULTS_PATH}/iperf3/"
-                  cp "${META_FILE}" "/tmp/repo/${GIT_RESULTS_PATH}/iperf3/"
+                  mkdir -p "/tmp/repo/${GIT_RESULTS_PATH}/latency"
+                  cp "${RAW_FILE}" "/tmp/repo/${GIT_RESULTS_PATH}/latency/"
+                  cp "${JSON_FILE}" "/tmp/repo/${GIT_RESULTS_PATH}/latency/"
 
                   cd /tmp/repo
                   git config user.name "${GIT_AUTHOR_NAME}"
                   git config user.email "${GIT_AUTHOR_EMAIL}"
-                  git add "${GIT_RESULTS_PATH}/iperf3"
-                  git commit -m "results(iperf3): ${CNI_NAME} ${TS}" || true
+                  git add "${GIT_RESULTS_PATH}/latency"
+                  git commit -m "results(latency): ${CNI_NAME} ${TS}" || true
                   git push origin "${GIT_BRANCH}"
               env:
                 - name: GIT_REPO_URL
@@ -198,6 +191,5 @@ spec:
                   cpu: "100m"
                   memory: "64Mi"
                 limits:
-                  # Sin límite agresivo de CPU para no throttlear el generador de carga.
-                  cpu: "1000m"
+                  cpu: "500m"
                   memory: "128Mi"

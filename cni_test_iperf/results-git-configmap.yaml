@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cni-results-git-config
+  namespace: cni-test
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+  labels:
+    app.kubernetes.io/part-of: cni-test
+    component: network-benchmark
+data:
+  # URL HTTPS del repositorio de resultados (sin credenciales)
+  GIT_REPO_URL: "https://github.com/DuwanSierra/K8S-CNI-Results.git"
+  # Rama donde se almacenarán los resultados
+  GIT_BRANCH: "main"
+  # Ruta base dentro del repo destino
+  GIT_RESULTS_PATH: "results/cni-benchmarks"
+  # Metadato para identificar el CNI evaluado en ese ambiente
+  CNI_NAME: "calico"
+  # Identidad de commits automáticos
+  GIT_AUTHOR_NAME: "cni-benchmark-bot"
+  GIT_AUTHOR_EMAIL: "cni-benchmark-bot@example.com"

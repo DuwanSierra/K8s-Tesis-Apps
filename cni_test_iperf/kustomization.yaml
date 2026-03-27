@@ -5,5 +5,7 @@ namespace: cni-test
 
 resources:
   - namespace.yaml
+  - results-git-configmap.yaml
   - iperf-server.yaml
   - iperf-client-cronjob.yaml
+  - latency-client-cronjob.yaml

@@ -73,6 +73,16 @@ spec:
                 - |
                   set -eu
 
+                  on_exit() {
+                    rc="$?"
+                    if [ "${rc}" -ne 0 ]; then
+                      echo "[debug] Fallo detectado (exit=${rc}). Manteniendo el pod ${DEBUG_HOLD_SECONDS}s para inspeccion..."
+                      sleep "${DEBUG_HOLD_SECONDS}"
+                    fi
+                    exit "${rc}"
+                  }
+                  trap 'on_exit' EXIT
+
                   apk add --no-cache iputils git ca-certificates >/dev/null
 
                   TS="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -186,6 +196,8 @@ spec:
                     secretKeyRef:
                       name: cni-results-git-credentials
                       key: GIT_TOKEN
+                - name: DEBUG_HOLD_SECONDS
+                  value: "600"
               resources:
                 requests:
                   cpu: "100m"

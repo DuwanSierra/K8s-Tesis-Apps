@@ -16,7 +16,7 @@ data:
   # Ruta base dentro del repo destino
   GIT_RESULTS_PATH: "results/cni-benchmarks"
   # Metadato para identificar el CNI evaluado en ese ambiente
-  CNI_NAME: "calico"
+  CNI_NAME: "flannel"
   # Identidad de commits automáticos
   GIT_AUTHOR_NAME: "cni-benchmark-bot"
   GIT_AUTHOR_EMAIL: "cni-benchmark-bot@example.com"

@@ -55,13 +55,19 @@ spec:
               cpu: "500m"
               memory: "128Mi"
           readinessProbe:
-            tcpSocket:
-              port: 5201
+            exec:
+              command:
+                - sh
+                - -c
+                - pidof iperf3 >/dev/null 2>&1
             initialDelaySeconds: 5
             periodSeconds: 10
           livenessProbe:
-            tcpSocket:
-              port: 5201
+            exec:
+              command:
+                - sh
+                - -c
+                - pidof iperf3 >/dev/null 2>&1
             initialDelaySeconds: 15
             periodSeconds: 20
 ---

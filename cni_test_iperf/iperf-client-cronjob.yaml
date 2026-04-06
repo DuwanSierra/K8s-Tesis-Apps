@@ -81,12 +81,12 @@ spec:
                 - sh
                 - -c
                 - |
-                  echo "[init] Esperando que el servidor iperf3 responda en 5201..."
-                  until nc -zw3 iperf3-server.cni-test.svc.cluster.local 5201; do
-                    echo "[init] Servidor no disponible, reintentando en 5s...";
+                  echo "[init] Esperando que DNS resuelva iperf3-server..."
+                  until nslookup iperf3-server.cni-test.svc.cluster.local >/dev/null 2>&1; do
+                    echo "[init] DNS aun no disponible, reintentando en 5s...";
                     sleep 5;
                   done
-                  echo "[init] Servidor listo. Iniciando prueba."
+                  echo "[init] DNS listo. Iniciando prueba."
               resources:
                 requests:
                   cpu: "10m"

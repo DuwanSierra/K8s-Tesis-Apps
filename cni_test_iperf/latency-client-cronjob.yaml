@@ -73,18 +73,48 @@ spec:
                 - |
                   set -eu
 
+                  CURRENT_STEP="bootstrap"
+
+                  log() {
+                    printf '%s [%-5s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "$2"
+                  }
+
+                  step() {
+                    CURRENT_STEP="$1"
+                    log INFO "${CURRENT_STEP}"
+                  }
+
                   on_exit() {
                     rc="$?"
                     if [ "${rc}" -ne 0 ]; then
+                      log ERROR "Fallo en paso: ${CURRENT_STEP} (exit=${rc})"
+                      log ERROR "Diagnostico rapido DNS/TCP contra iperf3-server"
+                      nslookup iperf3-server.cni-test.svc.cluster.local 2>&1 | sed 's/^/[diag] /' || true
+                      nc -vz iperf3-server.cni-test.svc.cluster.local 5201 2>&1 | sed 's/^/[diag] /' || true
+
+                      if [ -n "${RAW_FILE:-}" ] && [ -f "${RAW_FILE}" ]; then
+                        log ERROR "Ultimas lineas RAW_FILE=${RAW_FILE}"
+                        tail -n 20 "${RAW_FILE}" | sed 's/^/[raw] /' || true
+                      fi
+
+                      if [ -n "${JSON_FILE:-}" ] && [ -f "${JSON_FILE}" ]; then
+                        log INFO "JSON parcial detectado en ${JSON_FILE}"
+                        tail -n 20 "${JSON_FILE}" | sed 's/^/[json] /' || true
+                      fi
+
                       echo "[debug] Fallo detectado (exit=${rc}). Manteniendo el pod ${DEBUG_HOLD_SECONDS}s para inspeccion..."
                       sleep "${DEBUG_HOLD_SECONDS}"
+                    else
+                      log INFO "Ejecucion finalizada correctamente"
                     fi
                     exit "${rc}"
                   }
                   trap 'on_exit' EXIT
 
+                  step "Instalando dependencias"
                   apk add --no-cache iputils git ca-certificates >/dev/null
 
+                  step "Preparando rutas y nombres de salida"
                   TS="$(date -u +%Y%m%dT%H%M%SZ)"
                   OUTPUT_DIR="/tmp/results/latency"
                   RAW_FILE="${OUTPUT_DIR}/ping_${CNI_NAME}_${TS}.log"
@@ -92,8 +122,10 @@ spec:
 
                   mkdir -p "${OUTPUT_DIR}"
 
+                  step "Ejecutando ping ICMP"
                   ping -c 30 -i 1 -W 1 iperf3-server.cni-test.svc.cluster.local > "${RAW_FILE}"
 
+                  step "Parseando resultados de ping"
                   PACKETS_LINE="$(grep -E 'packets transmitted' "${RAW_FILE}" | tail -n1)"
                   RTT_LINE="$(grep -E 'rtt min/avg/max' "${RAW_FILE}" | tail -n1 || true)"
 
@@ -114,6 +146,7 @@ spec:
                     RTT_MDEV="null"
                   fi
 
+                  step "Generando JSON de resumen"
                   cat > "${JSON_FILE}" <<EOF
                   {
                     "timestamp_utc": "${TS}",
@@ -131,6 +164,7 @@ spec:
                   }
                   EOF
 
+                  step "Configurando autenticacion Git"
                   export GIT_TERMINAL_PROMPT=0
                   export GIT_ASKPASS=/tmp/git-askpass.sh
                   cat > "${GIT_ASKPASS}" <<'EOF'
@@ -142,13 +176,16 @@ spec:
                   EOF
                   chmod 700 "${GIT_ASKPASS}"
 
+                  step "Clonando repositorio de resultados"
                   rm -rf /tmp/repo
                   git clone --depth 1 --branch "${GIT_BRANCH}" "${GIT_REPO_URL}" /tmp/repo
 
+                  step "Copiando artifacts al repositorio"
                   mkdir -p "/tmp/repo/${GIT_RESULTS_PATH}/latency"
                   cp "${RAW_FILE}" "/tmp/repo/${GIT_RESULTS_PATH}/latency/"
                   cp "${JSON_FILE}" "/tmp/repo/${GIT_RESULTS_PATH}/latency/"
 
+                  step "Commit y push de resultados"
                   cd /tmp/repo
                   git config user.name "${GIT_AUTHOR_NAME}"
                   git config user.email "${GIT_AUTHOR_EMAIL}"

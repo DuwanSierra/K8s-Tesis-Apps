@@ -1,7 +1,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # Latency Client – CronJob
 #
-# Ejecuta una prueba de latencia (ICMP) contra el Service del servidor iperf3
+# Ejecuta una prueba de latencia de conexion TCP contra el Service del servidor iperf3
 # y exporta resultados (raw + summary JSON) a un repositorio Git.
 # ─────────────────────────────────────────────────────────────────────────────
 apiVersion: batch/v1
@@ -15,7 +15,7 @@ metadata:
     app.kubernetes.io/part-of: cni-test
   annotations:
     argocd.argoproj.io/sync-wave: "2"
-    cni-test/description: "Prueba de latencia ICMP con ping + exportación Git"
+    cni-test/description: "Prueba de latencia TCP connect contra 5201 + exportación Git"
 spec:
   # Offset de 5 minutos respecto al cron de throughput (*/6).
   # Si throughput inicia en minuto 0, la latencia corre en minuto 5.
@@ -112,55 +112,85 @@ spec:
                   trap 'on_exit' EXIT
 
                   step "Instalando dependencias"
-                  apk add --no-cache iputils git ca-certificates >/dev/null
+                  apk add --no-cache netcat-openbsd coreutils git ca-certificates >/dev/null
 
                   step "Preparando rutas y nombres de salida"
                   TS="$(date -u +%Y%m%dT%H%M%SZ)"
                   OUTPUT_DIR="/tmp/results/latency"
-                  RAW_FILE="${OUTPUT_DIR}/ping_${CNI_NAME}_${TS}.log"
-                  JSON_FILE="${OUTPUT_DIR}/ping_${CNI_NAME}_${TS}.json"
+                  RAW_FILE="${OUTPUT_DIR}/tcp_connect_${CNI_NAME}_${TS}.log"
+                  JSON_FILE="${OUTPUT_DIR}/tcp_connect_${CNI_NAME}_${TS}.json"
+                  TMP_MS_FILE="${OUTPUT_DIR}/tcp_connect_${CNI_NAME}_${TS}.ms"
+                  TARGET_HOST="iperf3-server.cni-test.svc.cluster.local"
+                  TARGET_PORT="5201"
+                  SAMPLES="30"
+                  SUCCESS_COUNT="0"
+                  TCP_STATUS="ok"
 
                   mkdir -p "${OUTPUT_DIR}"
+                  : > "${RAW_FILE}"
+                  : > "${TMP_MS_FILE}"
+                  printf 'sample,timestamp_utc,status,tcp_connect_ms\n' >> "${RAW_FILE}"
 
-                  step "Ejecutando ping ICMP"
-                  ping -c 30 -i 1 -W 1 iperf3-server.cni-test.svc.cluster.local > "${RAW_FILE}"
+                  step "Ejecutando muestreo de latencia TCP connect"
+                  i="1"
+                  while [ "${i}" -le "${SAMPLES}" ]; do
+                    SAMPLE_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                    START_MS="$(date +%s%3N)"
+                    if nc -z -w 2 "${TARGET_HOST}" "${TARGET_PORT}" >/dev/null 2>&1; then
+                      END_MS="$(date +%s%3N)"
+                      LAT_MS="$((END_MS - START_MS))"
+                      SUCCESS_COUNT="$((SUCCESS_COUNT + 1))"
+                      echo "${LAT_MS}" >> "${TMP_MS_FILE}"
+                      printf '%s,%s,%s,%s\n' "${i}" "${SAMPLE_TS}" "ok" "${LAT_MS}" >> "${RAW_FILE}"
+                      log INFO "sample=${i} tcp_connect_ms=${LAT_MS}"
+                    else
+                      printf '%s,%s,%s,%s\n' "${i}" "${SAMPLE_TS}" "fail" "null" >> "${RAW_FILE}"
+                      log ERROR "sample=${i} tcp_connect_failed"
+                    fi
+                    i="$((i + 1))"
+                    sleep 1
+                  done
 
-                  step "Parseando resultados de ping"
-                  PACKETS_LINE="$(grep -E 'packets transmitted' "${RAW_FILE}" | tail -n1)"
-                  RTT_LINE="$(grep -E 'rtt min/avg/max' "${RAW_FILE}" | tail -n1 || true)"
+                  step "Parseando resultados de latencia TCP connect"
+                  FAILED_COUNT="$((SAMPLES - SUCCESS_COUNT))"
+                  LOSS="$(awk -v total="${SAMPLES}" -v ok="${SUCCESS_COUNT}" 'BEGIN { printf "%.2f", ((total-ok)*100)/total }')"
 
-                  TX="$(echo "${PACKETS_LINE}" | awk '{print $1}')"
-                  RX="$(echo "${PACKETS_LINE}" | awk '{print $4}')"
-                  LOSS="$(echo "${PACKETS_LINE}" | awk -F', ' '{print $3}' | awk '{print $1}' | tr -d '%')"
-
-                  if [ -n "${RTT_LINE}" ]; then
-                    RTT_VALUES="$(echo "${RTT_LINE}" | awk -F'=' '{print $2}' | xargs)"
-                    RTT_MIN="$(echo "${RTT_VALUES}" | cut -d'/' -f1)"
-                    RTT_AVG="$(echo "${RTT_VALUES}" | cut -d'/' -f2)"
-                    RTT_MAX="$(echo "${RTT_VALUES}" | cut -d'/' -f3)"
-                    RTT_MDEV="$(echo "${RTT_VALUES}" | cut -d'/' -f4 | awk '{print $1}')"
+                  if [ "${SUCCESS_COUNT}" = "0" ]; then
+                    TCP_STATUS="unreachable"
+                    TCP_MIN_MS="null"
+                    TCP_AVG_MS="null"
+                    TCP_MAX_MS="null"
+                    TCP_MDEV_MS="null"
                   else
-                    RTT_MIN="null"
-                    RTT_AVG="null"
-                    RTT_MAX="null"
-                    RTT_MDEV="null"
+                    TCP_STATUS="ok"
+                    if [ "${FAILED_COUNT}" -gt "0" ]; then
+                      TCP_STATUS="degraded"
+                    fi
+
+                    TCP_MIN_MS="$(awk 'NR==1 || $1<min {min=$1} END {print min}' "${TMP_MS_FILE}")"
+                    TCP_AVG_MS="$(awk '{sum+=$1} END {printf "%.3f", sum/NR}' "${TMP_MS_FILE}")"
+                    TCP_MAX_MS="$(awk 'NR==1 || $1>max {max=$1} END {print max}' "${TMP_MS_FILE}")"
+                    TCP_MDEV_MS="$(awk '{x[NR]=$1;sum+=$1} END {avg=sum/NR; for(i=1;i<=NR;i++){d=x[i]-avg; ss+=d*d}; printf "%.3f", sqrt(ss/NR)}' "${TMP_MS_FILE}")"
                   fi
 
                   step "Generando JSON de resumen"
                   cat > "${JSON_FILE}" <<EOF
                   {
                     "timestamp_utc": "${TS}",
-                    "benchmark_type": "latency_icmp",
+                    "benchmark_type": "latency_tcp_connect",
                     "cni_name": "${CNI_NAME}",
                     "namespace": "cni-test",
-                    "target": "iperf3-server.cni-test.svc.cluster.local",
-                    "packets_transmitted": ${TX},
-                    "packets_received": ${RX},
-                    "packet_loss_percent": ${LOSS},
-                    "rtt_min_ms": ${RTT_MIN},
-                    "rtt_avg_ms": ${RTT_AVG},
-                    "rtt_max_ms": ${RTT_MAX},
-                    "rtt_mdev_ms": ${RTT_MDEV}
+                    "target_host": "${TARGET_HOST}",
+                    "target_port": ${TARGET_PORT},
+                    "tcp_status": "${TCP_STATUS}",
+                    "samples_attempted": ${SAMPLES},
+                    "samples_succeeded": ${SUCCESS_COUNT},
+                    "samples_failed": ${FAILED_COUNT},
+                    "connect_failure_percent": ${LOSS},
+                    "tcp_connect_min_ms": ${TCP_MIN_MS},
+                    "tcp_connect_avg_ms": ${TCP_AVG_MS},
+                    "tcp_connect_max_ms": ${TCP_MAX_MS},
+                    "tcp_connect_mdev_ms": ${TCP_MDEV_MS}
                   }
                   EOF
 

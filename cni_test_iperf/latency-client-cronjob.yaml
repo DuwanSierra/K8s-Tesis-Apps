@@ -1,8 +1,8 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # Latency Client – CronJob
 #
-# Ejecuta una prueba de latencia de conexion TCP contra el Service del servidor iperf3
-# y exporta resultados (raw + summary JSON) a un repositorio Git.
+# Exporta una corrida por ejecución en un JSON normalizado para análisis,
+# almacenado por CNI/tipo de prueba con retención máxima de 5 corridas.
 # ─────────────────────────────────────────────────────────────────────────────
 apiVersion: batch/v1
 kind: CronJob
@@ -92,14 +92,14 @@ spec:
                       nslookup iperf3-server.cni-test.svc.cluster.local 2>&1 | sed 's/^/[diag] /' || true
                       nc -vz iperf3-server.cni-test.svc.cluster.local 5201 2>&1 | sed 's/^/[diag] /' || true
 
-                      if [ -n "${RAW_FILE:-}" ] && [ -f "${RAW_FILE}" ]; then
-                        log ERROR "Ultimas lineas RAW_FILE=${RAW_FILE}"
-                        tail -n 20 "${RAW_FILE}" | sed 's/^/[raw] /' || true
+                      if [ -n "${TMP_MS_FILE:-}" ] && [ -f "${TMP_MS_FILE}" ]; then
+                        log ERROR "Ultimas lineas TMP_MS_FILE=${TMP_MS_FILE}"
+                        tail -n 20 "${TMP_MS_FILE}" | sed 's/^/[ms] /' || true
                       fi
 
-                      if [ -n "${JSON_FILE:-}" ] && [ -f "${JSON_FILE}" ]; then
-                        log INFO "JSON parcial detectado en ${JSON_FILE}"
-                        tail -n 20 "${JSON_FILE}" | sed 's/^/[json] /' || true
+                      if [ -n "${RUN_FILE:-}" ] && [ -f "${RUN_FILE}" ]; then
+                        log INFO "JSON parcial detectado en ${RUN_FILE}"
+                        tail -n 20 "${RUN_FILE}" | sed 's/^/[json] /' || true
                       fi
 
                       echo "[debug] Fallo detectado (exit=${rc}). Manteniendo el pod ${DEBUG_HOLD_SECONDS}s para inspeccion..."
@@ -117,22 +117,23 @@ spec:
                   step "Preparando rutas y nombres de salida"
                   TS="$(date -u +%Y%m%dT%H%M%SZ)"
                   OUTPUT_DIR="/tmp/results/latency"
-                  RAW_FILE="${OUTPUT_DIR}/tcp_connect_${CNI_NAME}_${TS}.log"
-                  JSON_FILE="${OUTPUT_DIR}/tcp_connect_${CNI_NAME}_${TS}.json"
+                  RUN_FILE="${OUTPUT_DIR}/run_latency_${CNI_NAME}_${TS}.json"
                   TMP_MS_FILE="${OUTPUT_DIR}/tcp_connect_${CNI_NAME}_${TS}.ms"
                   TARGET_HOST="iperf3-server.cni-test.svc.cluster.local"
                   TARGET_PORT="5201"
                   SAMPLES="30"
                   SUCCESS_COUNT="0"
                   TCP_STATUS="ok"
+                  TEST_TYPE="latency_tcp_connect"
+                  RETENTION_MAX_RUNS="5"
+                  SAMPLES_JSON="[]"
 
                   mkdir -p "${OUTPUT_DIR}"
-                  : > "${RAW_FILE}"
                   : > "${TMP_MS_FILE}"
-                  printf 'sample,timestamp_utc,status,tcp_connect_ms\n' >> "${RAW_FILE}"
 
                   step "Ejecutando muestreo de latencia TCP connect"
                   i="1"
+                  SAMPLES_JSON="["
                   while [ "${i}" -le "${SAMPLES}" ]; do
                     SAMPLE_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
                     START_MS="$(date +%s%3N)"
@@ -141,15 +142,22 @@ spec:
                       LAT_MS="$((END_MS - START_MS))"
                       SUCCESS_COUNT="$((SUCCESS_COUNT + 1))"
                       echo "${LAT_MS}" >> "${TMP_MS_FILE}"
-                      printf '%s,%s,%s,%s\n' "${i}" "${SAMPLE_TS}" "ok" "${LAT_MS}" >> "${RAW_FILE}"
+                      SAMPLE_ITEM="{\"sample\":${i},\"timestamp_utc\":\"${SAMPLE_TS}\",\"status\":\"ok\",\"tcp_connect_ms\":${LAT_MS}}"
                       log INFO "sample=${i} tcp_connect_ms=${LAT_MS}"
                     else
-                      printf '%s,%s,%s,%s\n' "${i}" "${SAMPLE_TS}" "fail" "null" >> "${RAW_FILE}"
+                      SAMPLE_ITEM="{\"sample\":${i},\"timestamp_utc\":\"${SAMPLE_TS}\",\"status\":\"fail\",\"tcp_connect_ms\":null}"
                       log ERROR "sample=${i} tcp_connect_failed"
                     fi
+
+                    if [ "${i}" -gt "1" ]; then
+                      SAMPLES_JSON="${SAMPLES_JSON},"
+                    fi
+                    SAMPLES_JSON="${SAMPLES_JSON}${SAMPLE_ITEM}"
+
                     i="$((i + 1))"
                     sleep 1
                   done
+                  SAMPLES_JSON="${SAMPLES_JSON}]"
 
                   step "Parseando resultados de latencia TCP connect"
                   FAILED_COUNT="$((SAMPLES - SUCCESS_COUNT))"
@@ -173,13 +181,21 @@ spec:
                     TCP_MDEV_MS="$(awk '{x[NR]=$1;sum+=$1} END {avg=sum/NR; for(i=1;i<=NR;i++){d=x[i]-avg; ss+=d*d}; printf "%.3f", sqrt(ss/NR)}' "${TMP_MS_FILE}")"
                   fi
 
-                  step "Generando JSON de resumen"
-                  cat > "${JSON_FILE}" <<EOF
+                  step "Generando JSON normalizado de corrida"
+                  cat > "${RUN_FILE}" <<EOF
                   {
                     "timestamp_utc": "${TS}",
-                    "benchmark_type": "latency_tcp_connect",
+                    "benchmark_type": "${TEST_TYPE}",
                     "cni_name": "${CNI_NAME}",
                     "namespace": "cni-test",
+                    "source": "cronjob/latency-client",
+                    "measurement_human": {
+                      "objective": "Medir latencia de establecimiento TCP (connect) contra el Service de iperf3",
+                      "what_is_measured": "min/avg/max/mdev de tcp_connect_ms y porcentaje de fallas",
+                      "traffic_profile": "30 intentos, timeout 2s, intervalo 1s",
+                      "target": "${TARGET_HOST}:${TARGET_PORT}",
+                      "decision_usage": "Comparar CNIs por estabilidad y costo de establecimiento de sesion"
+                    },
                     "target_host": "${TARGET_HOST}",
                     "target_port": ${TARGET_PORT},
                     "tcp_status": "${TCP_STATUS}",
@@ -190,7 +206,8 @@ spec:
                     "tcp_connect_min_ms": ${TCP_MIN_MS},
                     "tcp_connect_avg_ms": ${TCP_AVG_MS},
                     "tcp_connect_max_ms": ${TCP_MAX_MS},
-                    "tcp_connect_mdev_ms": ${TCP_MDEV_MS}
+                    "tcp_connect_mdev_ms": ${TCP_MDEV_MS},
+                    "samples": ${SAMPLES_JSON}
                   }
                   EOF
 
@@ -211,16 +228,20 @@ spec:
                   git clone --depth 1 --branch "${GIT_BRANCH}" "${GIT_REPO_URL}" /tmp/repo
 
                   step "Copiando artifacts al repositorio"
-                  mkdir -p "/tmp/repo/${GIT_RESULTS_PATH}/latency"
-                  cp "${RAW_FILE}" "/tmp/repo/${GIT_RESULTS_PATH}/latency/"
-                  cp "${JSON_FILE}" "/tmp/repo/${GIT_RESULTS_PATH}/latency/"
+                  DEST_DIR="/tmp/repo/${GIT_RESULTS_PATH}/${CNI_NAME}/${TEST_TYPE}"
+                  mkdir -p "${DEST_DIR}"
+                  cp "${RUN_FILE}" "${DEST_DIR}/run_${TS}.json"
+
+                  step "Aplicando retencion maxima de 5 corridas"
+                  cd "${DEST_DIR}"
+                  ls -1t run_*.json 2>/dev/null | awk "NR>${RETENTION_MAX_RUNS}" | xargs -r rm -f
 
                   step "Commit y push de resultados"
                   cd /tmp/repo
                   git config user.name "${GIT_AUTHOR_NAME}"
                   git config user.email "${GIT_AUTHOR_EMAIL}"
-                  git add "${GIT_RESULTS_PATH}/latency"
-                  git commit -m "results(latency): ${CNI_NAME} ${TS}" || true
+                  git add "${GIT_RESULTS_PATH}/${CNI_NAME}/${TEST_TYPE}"
+                  git commit -m "results(latency): ${CNI_NAME} ${TS} (max5)" || true
                   git push origin "${GIT_BRANCH}"
               env:
                 - name: GIT_REPO_URL

@@ -1,20 +1,8 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # iperf3 Client – CronJob
 #
-# Diseño: CronJob con schedule "*/10 * * * *" (cada 10 minutos).
-# Esto garantiza que el primer disparo ocurra dentro de los 10 minutos
-# posteriores a la instalación del app en ArgoCD, cumpliendo el requerimiento
-# de "ejecutarse a los 10 minutos".
-#
-# Parámetros de prueba (alineados con la metodología de la tesis):
-#   -t 300   → Duración: 5 minutos (300 s) de tráfico continuo
-#   -i 10    → Intervalo: muestra cada 10 s → 30 puntos de datos por ejecución
-#   -J       → Salida en formato JSON (para análisis posterior)
-#   -p 5201  → Puerto del servidor
-#
-# Para medir intra-nodo: eliminar el podAffinity de este manifiesto y del
-# servidor para que ambos caigan en el mismo nodo.
-# Para medir inter-nodo: mantener el podAntiAffinity del servidor (default).
+# Exporta una corrida por ejecución en un JSON normalizado para análisis,
+# almacenado por CNI/tipo de prueba con retención máxima de 5 corridas.
 # ─────────────────────────────────────────────────────────────────────────────
 apiVersion: batch/v1
 kind: CronJob
@@ -123,14 +111,14 @@ spec:
                       nslookup iperf3-server.cni-test.svc.cluster.local 2>&1 | sed 's/^/[diag] /' || true
                       nc -vz iperf3-server.cni-test.svc.cluster.local 5201 2>&1 | sed 's/^/[diag] /' || true
 
-                      if [ -n "${RESULT_FILE:-}" ] && [ -f "${RESULT_FILE}" ]; then
-                        log INFO "JSON parcial detectado en RESULT_FILE=${RESULT_FILE}"
-                        tail -n 20 "${RESULT_FILE}" | sed 's/^/[iperf3] /' || true
+                      if [ -n "${RAW_IPERF_FILE:-}" ] && [ -f "${RAW_IPERF_FILE}" ]; then
+                        log INFO "JSON raw parcial detectado en RAW_IPERF_FILE=${RAW_IPERF_FILE}"
+                        tail -n 20 "${RAW_IPERF_FILE}" | sed 's/^/[iperf3] /' || true
                       fi
 
-                      if [ -n "${META_FILE:-}" ] && [ -f "${META_FILE}" ]; then
-                        log INFO "Metadata parcial detectada en META_FILE=${META_FILE}"
-                        tail -n 20 "${META_FILE}" | sed 's/^/[meta] /' || true
+                      if [ -n "${RUN_FILE:-}" ] && [ -f "${RUN_FILE}" ]; then
+                        log INFO "JSON normalizado parcial detectado en RUN_FILE=${RUN_FILE}"
+                        tail -n 20 "${RUN_FILE}" | sed 's/^/[run] /' || true
                       fi
 
                       echo "[debug] Fallo detectado (exit=${rc}). Manteniendo el pod ${DEBUG_HOLD_SECONDS}s para inspeccion..."
@@ -143,31 +131,58 @@ spec:
                   trap 'on_exit' EXIT
 
                   step "Instalando dependencias"
-                  apk add --no-cache iperf3 git ca-certificates >/dev/null
+                  apk add --no-cache iperf3 git ca-certificates jq >/dev/null
 
                   step "Preparando rutas y nombres de salida"
                   TS="$(date -u +%Y%m%dT%H%M%SZ)"
                   OUTPUT_DIR="/tmp/results/iperf3"
-                  RESULT_FILE="${OUTPUT_DIR}/iperf3_${CNI_NAME}_${TS}.json"
-                  META_FILE="${OUTPUT_DIR}/iperf3_${CNI_NAME}_${TS}.meta"
+                  RAW_IPERF_FILE="${OUTPUT_DIR}/raw_iperf3_${CNI_NAME}_${TS}.json"
+                  RUN_FILE="${OUTPUT_DIR}/run_iperf3_${CNI_NAME}_${TS}.json"
+                  TEST_TYPE="throughput_tcp"
+                  TARGET_HOST="iperf3-server.cni-test.svc.cluster.local"
+                  TARGET_PORT="5201"
+                  RETENTION_MAX_RUNS="5"
 
                   mkdir -p "${OUTPUT_DIR}"
 
                   step "Ejecutando prueba iperf3"
                   iperf3 \
-                    -c iperf3-server.cni-test.svc.cluster.local \
-                    -p 5201 \
+                    -c "${TARGET_HOST}" \
+                    -p "${TARGET_PORT}" \
                     -t 300 \
                     -i 10 \
-                    -J > "${RESULT_FILE}"
+                    -J > "${RAW_IPERF_FILE}"
 
-                  step "Generando metadata de corrida"
-                  cat > "${META_FILE}" <<EOF
-                  timestamp_utc=${TS}
-                  benchmark_type=throughput_tcp
-                  cni_name=${CNI_NAME}
-                  namespace=cni-test
-                  source=cronjob/iperf3-client
+                  step "Generando JSON normalizado de corrida"
+                  SENDER_BPS="$(jq -r '.end.sum_sent.bits_per_second // 0' "${RAW_IPERF_FILE}")"
+                  RECEIVER_BPS="$(jq -r '.end.sum_received.bits_per_second // 0' "${RAW_IPERF_FILE}")"
+                  RETRANSMITS="$(jq -r '.end.sum_sent.retransmits // 0' "${RAW_IPERF_FILE}")"
+                  DURATION_SECONDS="$(jq -r '.end.sum_received.seconds // .start.test_start.duration // 300' "${RAW_IPERF_FILE}")"
+
+                  cat > "${RUN_FILE}" <<EOF
+                  {
+                    "timestamp_utc": "${TS}",
+                    "benchmark_type": "${TEST_TYPE}",
+                    "cni_name": "${CNI_NAME}",
+                    "namespace": "cni-test",
+                    "source": "cronjob/iperf3-client",
+                    "measurement_human": {
+                      "objective": "Medir throughput TCP L3 entre pods via Service usando iperf3",
+                      "what_is_measured": "bits_per_second de envio y recepcion, y retransmisiones TCP",
+                      "topology_hint": "inter-nodo por anti-affinity preferente; para intra-nodo quitar anti-affinity",
+                      "traffic_profile": "iperf3 -t 300 -i 10 -J",
+                      "target": "${TARGET_HOST}:${TARGET_PORT}",
+                      "decision_usage": "Comparar CNIs por throughput efectivo y estabilidad (retransmisiones)"
+                    },
+                    "summary": {
+                      "duration_seconds": ${DURATION_SECONDS},
+                      "sender_bits_per_second": ${SENDER_BPS},
+                      "receiver_bits_per_second": ${RECEIVER_BPS},
+                      "retransmits": ${RETRANSMITS}
+                    },
+                    "raw":
+                  $(cat "${RAW_IPERF_FILE}")
+                  }
                   EOF
 
                   step "Configurando autenticacion Git"
@@ -187,16 +202,20 @@ spec:
                   git clone --depth 1 --branch "${GIT_BRANCH}" "${GIT_REPO_URL}" /tmp/repo
 
                   step "Copiando artifacts al repositorio"
-                  mkdir -p "/tmp/repo/${GIT_RESULTS_PATH}/iperf3"
-                  cp "${RESULT_FILE}" "/tmp/repo/${GIT_RESULTS_PATH}/iperf3/"
-                  cp "${META_FILE}" "/tmp/repo/${GIT_RESULTS_PATH}/iperf3/"
+                  DEST_DIR="/tmp/repo/${GIT_RESULTS_PATH}/${CNI_NAME}/${TEST_TYPE}"
+                  mkdir -p "${DEST_DIR}"
+                  cp "${RUN_FILE}" "${DEST_DIR}/run_${TS}.json"
+
+                  step "Aplicando retencion maxima de 5 corridas"
+                  cd "${DEST_DIR}"
+                  ls -1t run_*.json 2>/dev/null | awk "NR>${RETENTION_MAX_RUNS}" | xargs -r rm -f
 
                   step "Commit y push de resultados"
                   cd /tmp/repo
                   git config user.name "${GIT_AUTHOR_NAME}"
                   git config user.email "${GIT_AUTHOR_EMAIL}"
-                  git add "${GIT_RESULTS_PATH}/iperf3"
-                  git commit -m "results(iperf3): ${CNI_NAME} ${TS}" || true
+                  git add "${GIT_RESULTS_PATH}/${CNI_NAME}/${TEST_TYPE}"
+                  git commit -m "results(throughput): ${CNI_NAME} ${TS} (max5)" || true
                   git push origin "${GIT_BRANCH}"
               env:
                 - name: GIT_REPO_URL

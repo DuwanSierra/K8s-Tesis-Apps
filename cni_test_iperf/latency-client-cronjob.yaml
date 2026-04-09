@@ -17,9 +17,9 @@ metadata:
     argocd.argoproj.io/sync-wave: "2"
     cni-test/description: "Prueba de latencia TCP connect contra 5201 + exportación Git"
 spec:
-  # Offset de 5 minutos respecto al cron de throughput (*/6).
-  # Si throughput inicia en minuto 0, la latencia corre en minuto 5.
-  schedule: "5-59/6 * * * *"
+  # Ventana separada para no solapar con throughput.
+  # Si throughput inicia en minuto 0/30, la latencia corre en 10/40.
+  schedule: "10,40 * * * *"
   concurrencyPolicy: Forbid
   startingDeadlineSeconds: 120
   successfulJobsHistoryLimit: 5

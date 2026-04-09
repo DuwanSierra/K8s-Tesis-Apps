@@ -1,0 +1,24 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: cni-resource-exporter
+  namespace: argocd
+  annotations:
+    # Se despliega junto al benchmark de red, despues de metrics base
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/DuwanSierra/K8s-Tesis-Apps.git
+    targetRevision: HEAD
+    path: grafana-exporter
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: cni-test
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

@@ -1,0 +1,338 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: cni-resource-usage-exporter
+  namespace: cni-test
+  labels:
+    app: cni-resource-usage-exporter
+    component: resource-observability
+    app.kubernetes.io/part-of: cni-test
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+    cni-test/description: "Exporta uso de CPU/Mem por nodo desde Prometheus en formatos raw/csv/png/md"
+spec:
+  # Ejecuta despues de cada bloque de pruebas para capturar ventana antes/durante/despues.
+  # Con pruebas en min 0 y 10, exporta en min 25.
+  # Con pruebas en min 30 y 40, exporta en min 55.
+  schedule: "25,55 * * * *"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 180
+  successfulJobsHistoryLimit: 5
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      ttlSecondsAfterFinished: 7200
+      template:
+        metadata:
+          labels:
+            app: cni-resource-usage-exporter
+            component: resource-observability
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: exporter
+              image: debian:12-slim
+              command:
+                - bash
+                - -c
+                - |
+                  set -euo pipefail
+
+                  log() {
+                    printf '%s [%-5s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "$2"
+                  }
+
+                  CURRENT_STEP="bootstrap"
+                  step() {
+                    CURRENT_STEP="$1"
+                    log INFO "$CURRENT_STEP"
+                  }
+
+                  on_exit() {
+                    rc="$?"
+                    if [ "$rc" -ne 0 ]; then
+                      log ERROR "Fallo en paso: ${CURRENT_STEP} (exit=${rc})"
+                    else
+                      log INFO "Exportacion completada"
+                    fi
+                    exit "$rc"
+                  }
+                  trap 'on_exit' EXIT
+
+                  step "Instalando dependencias"
+                  export DEBIAN_FRONTEND=noninteractive
+                  apt-get update >/dev/null
+                  apt-get install -y --no-install-recommends ca-certificates curl jq git gnuplot >/dev/null
+                  rm -rf /var/lib/apt/lists/*
+
+                  step "Calculando ventana temporal"
+                  TS="$(date -u +%Y%m%dT%H%M%SZ)"
+                  END_EPOCH="$(date -u +%s)"
+                  START_EPOCH="$((END_EPOCH - (EXPORT_WINDOW_MINUTES * 60)))"
+
+                  PROM_QUERY_CPU='100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[2m])))'
+                  PROM_QUERY_MEM_PCT='100 * (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes))'
+                  PROM_QUERY_MEM_USED='(node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes)'
+
+                  BASE_DIR="/tmp/export/${TS}"
+                  RAW_DIR="${BASE_DIR}/raw"
+                  CSV_DIR="${BASE_DIR}/csv"
+                  IMG_DIR="${BASE_DIR}/images"
+                  HUMAN_DIR="${BASE_DIR}/human"
+                  mkdir -p "$RAW_DIR" "$CSV_DIR" "$IMG_DIR" "$HUMAN_DIR"
+
+                  query_range_to_raw() {
+                    local query="$1"
+                    local output="$2"
+                    curl -sS --fail --get "${PROMETHEUS_URL}/api/v1/query_range" \
+                      --data-urlencode "query=${query}" \
+                      --data-urlencode "start=${START_EPOCH}" \
+                      --data-urlencode "end=${END_EPOCH}" \
+                      --data-urlencode "step=${QUERY_STEP}" > "$output"
+                  }
+
+                  raw_to_tsv() {
+                    local raw_file="$1"
+                    local tsv_file="$2"
+                    jq -r '
+                      .data.result[] as $r |
+                      ($r.metric.instance // "unknown") as $node |
+                      $r.values[] |
+                      [.[0], $node, .[1]] | @tsv
+                    ' "$raw_file" > "$tsv_file"
+                  }
+
+                  write_summary_md() {
+                    local cpu_tsv="$1"
+                    local mem_pct_tsv="$2"
+                    local mem_used_tsv="$3"
+                    local out_md="$4"
+
+                    {
+                      echo "# Resumen Humano - Uso de Recursos por Nodo"
+                      echo
+                      echo "- timestamp_export_utc: ${TS}"
+                      echo "- cni_name: ${CNI_NAME}"
+                      echo "- ventana_minutos: ${EXPORT_WINDOW_MINUTES}"
+                      echo "- start_epoch: ${START_EPOCH}"
+                      echo "- end_epoch: ${END_EPOCH}"
+                      echo "- query_step: ${QUERY_STEP}"
+                      echo
+                      echo "## CPU (porcentaje)"
+                      echo
+                      echo "| node | avg_cpu_pct | max_cpu_pct |"
+                      echo "|---|---:|---:|"
+                      awk '
+                        {sum[$2]+=$3; cnt[$2]+=1; if ($3>max[$2]) max[$2]=$3}
+                        END {
+                          for (n in cnt) {
+                            printf("| %s | %.3f | %.3f |\\n", n, sum[n]/cnt[n], max[n])
+                          }
+                        }
+                      ' "$cpu_tsv" | sort
+                      echo
+                      echo "## Memoria (porcentaje)"
+                      echo
+                      echo "| node | avg_mem_pct | max_mem_pct |"
+                      echo "|---|---:|---:|"
+                      awk '
+                        {sum[$2]+=$3; cnt[$2]+=1; if ($3>max[$2]) max[$2]=$3}
+                        END {
+                          for (n in cnt) {
+                            printf("| %s | %.3f | %.3f |\\n", n, sum[n]/cnt[n], max[n])
+                          }
+                        }
+                      ' "$mem_pct_tsv" | sort
+                      echo
+                      echo "## Memoria usada (MiB)"
+                      echo
+                      echo "| node | avg_mem_used_mib | max_mem_used_mib |"
+                      echo "|---|---:|---:|"
+                      awk '
+                        {
+                          v=$3/1024/1024;
+                          sum[$2]+=v;
+                          cnt[$2]+=1;
+                          if (v>max[$2]) max[$2]=v
+                        }
+                        END {
+                          for (n in cnt) {
+                            printf("| %s | %.3f | %.3f |\\n", n, sum[n]/cnt[n], max[n])
+                          }
+                        }
+                      ' "$mem_used_tsv" | sort
+                    } > "$out_md"
+                  }
+
+                  render_png_per_node() {
+                    local tsv_file="$1"
+                    local metric_name="$2"
+                    local y_label="$3"
+                    local out_dir="$4"
+
+                    awk '{print $2}' "$tsv_file" | sort -u | while read -r node; do
+                      safe_node="$(echo "$node" | tr ':./' '____')"
+                      node_tsv="${out_dir}/${metric_name}_${safe_node}.tsv"
+                      awk -v n="$node" '$2==n {print $1"\t"$3}' "$tsv_file" > "$node_tsv"
+
+                      gnuplot <<EOF
+                  set terminal pngcairo size 1400,500
+                  set output "${out_dir}/${metric_name}_${safe_node}.png"
+                  set xdata time
+                  set timefmt "%s"
+                  set format x "%H:%M"
+                  set grid
+                  set title "${metric_name} - ${node} - ${CNI_NAME}"
+                  set xlabel "UTC"
+                  set ylabel "${y_label}"
+                  plot "${node_tsv}" using 1:2 with lines lw 2 title "${node}"
+                  EOF
+                    done
+                  }
+
+                  step "Consultando Prometheus (raw JSON)"
+                  query_range_to_raw "$PROM_QUERY_CPU" "${RAW_DIR}/cpu_pct_raw.json"
+                  query_range_to_raw "$PROM_QUERY_MEM_PCT" "${RAW_DIR}/mem_pct_raw.json"
+                  query_range_to_raw "$PROM_QUERY_MEM_USED" "${RAW_DIR}/mem_used_bytes_raw.json"
+
+                  step "Convirtiendo a TSV/CSV"
+                  raw_to_tsv "${RAW_DIR}/cpu_pct_raw.json" "${CSV_DIR}/cpu_pct.tsv"
+                  raw_to_tsv "${RAW_DIR}/mem_pct_raw.json" "${CSV_DIR}/mem_pct.tsv"
+                  raw_to_tsv "${RAW_DIR}/mem_used_bytes_raw.json" "${CSV_DIR}/mem_used_bytes.tsv"
+
+                  {
+                    echo -e "epoch\tnode\tvalue"
+                    cat "${CSV_DIR}/cpu_pct.tsv"
+                  } > "${CSV_DIR}/cpu_pct.csv"
+                  {
+                    echo -e "epoch\tnode\tvalue"
+                    cat "${CSV_DIR}/mem_pct.tsv"
+                  } > "${CSV_DIR}/mem_pct.csv"
+                  {
+                    echo -e "epoch\tnode\tvalue_bytes"
+                    cat "${CSV_DIR}/mem_used_bytes.tsv"
+                  } > "${CSV_DIR}/mem_used_bytes.csv"
+
+                  step "Generando resumen humano"
+                  write_summary_md \
+                    "${CSV_DIR}/cpu_pct.tsv" \
+                    "${CSV_DIR}/mem_pct.tsv" \
+                    "${CSV_DIR}/mem_used_bytes.tsv" \
+                    "${HUMAN_DIR}/summary_${TS}.md"
+
+                  step "Renderizando imagenes PNG"
+                  render_png_per_node "${CSV_DIR}/cpu_pct.tsv" "cpu_pct" "% CPU" "${IMG_DIR}"
+                  render_png_per_node "${CSV_DIR}/mem_pct.tsv" "mem_pct" "% Mem" "${IMG_DIR}"
+                  render_png_per_node "${CSV_DIR}/mem_used_bytes.tsv" "mem_used_mib" "Bytes" "${IMG_DIR}"
+
+                  step "Configurando autenticacion Git"
+                  export GIT_TERMINAL_PROMPT=0
+                  export GIT_ASKPASS=/tmp/git-askpass.sh
+                  cat > "${GIT_ASKPASS}" <<'EOF'
+                  #!/bin/sh
+                  case "$1" in
+                    *Username*) echo "$GIT_USER" ;;
+                    *Password*) echo "$GIT_TOKEN" ;;
+                  esac
+                  EOF
+                  chmod 700 "${GIT_ASKPASS}"
+
+                  step "Clonando repositorio destino"
+                  rm -rf /tmp/repo
+                  git clone --depth 1 --branch "${GIT_BRANCH}" "${GIT_REPO_URL}" /tmp/repo
+
+                  step "Copiando exportacion ordenada por carpetas"
+                  DEST_DIR="/tmp/repo/${GIT_RESULTS_PATH}/${CNI_NAME}/${RESOURCE_RESULTS_SUBPATH}/${TS}"
+                  mkdir -p "${DEST_DIR}"
+                  cp -r "${RAW_DIR}" "${DEST_DIR}/raw"
+                  cp -r "${CSV_DIR}" "${DEST_DIR}/csv"
+                  cp -r "${IMG_DIR}" "${DEST_DIR}/images"
+                  cp -r "${HUMAN_DIR}" "${DEST_DIR}/human"
+
+                  step "Aplicando retencion por CNI"
+                  RETENTION_ROOT="/tmp/repo/${GIT_RESULTS_PATH}/${CNI_NAME}/${RESOURCE_RESULTS_SUBPATH}"
+                  mkdir -p "${RETENTION_ROOT}"
+                  cd "${RETENTION_ROOT}"
+                  ls -1dt 20* 2>/dev/null | awk "NR>${RETENTION_MAX_EXPORTS}" | xargs -r rm -rf
+
+                  step "Commit y push"
+                  cd /tmp/repo
+                  git config user.name "${GIT_AUTHOR_NAME}"
+                  git config user.email "${GIT_AUTHOR_EMAIL}"
+                  git add "${GIT_RESULTS_PATH}/${CNI_NAME}/${RESOURCE_RESULTS_SUBPATH}"
+                  git commit -m "results(resources): ${CNI_NAME} ${TS} window=${EXPORT_WINDOW_MINUTES}m" || true
+                  git push origin "${GIT_BRANCH}"
+              env:
+                - name: PROMETHEUS_URL
+                  valueFrom:
+                    configMapKeyRef:
+                      name: cni-resource-exporter-config
+                      key: PROMETHEUS_URL
+                - name: EXPORT_WINDOW_MINUTES
+                  valueFrom:
+                    configMapKeyRef:
+                      name: cni-resource-exporter-config
+                      key: EXPORT_WINDOW_MINUTES
+                - name: QUERY_STEP
+                  valueFrom:
+                    configMapKeyRef:
+                      name: cni-resource-exporter-config
+                      key: QUERY_STEP
+                - name: RESOURCE_RESULTS_SUBPATH
+                  valueFrom:
+                    configMapKeyRef:
+                      name: cni-resource-exporter-config
+                      key: RESOURCE_RESULTS_SUBPATH
+                - name: RETENTION_MAX_EXPORTS
+                  valueFrom:
+                    configMapKeyRef:
+                      name: cni-resource-exporter-config
+                      key: RETENTION_MAX_EXPORTS
+                - name: GIT_REPO_URL
+                  valueFrom:
+                    configMapKeyRef:
+                      name: cni-results-git-config
+                      key: GIT_REPO_URL
+                - name: GIT_BRANCH
+                  valueFrom:
+                    configMapKeyRef:
+                      name: cni-results-git-config
+                      key: GIT_BRANCH
+                - name: GIT_RESULTS_PATH
+                  valueFrom:
+                    configMapKeyRef:
+                      name: cni-results-git-config
+                      key: GIT_RESULTS_PATH
+                - name: GIT_AUTHOR_NAME
+                  valueFrom:
+                    configMapKeyRef:
+                      name: cni-results-git-config
+                      key: GIT_AUTHOR_NAME
+                - name: GIT_AUTHOR_EMAIL
+                  valueFrom:
+                    configMapKeyRef:
+                      name: cni-results-git-config
+                      key: GIT_AUTHOR_EMAIL
+                - name: CNI_NAME
+                  valueFrom:
+                    configMapKeyRef:
+                      name: cni-results-git-config
+                      key: CNI_NAME
+                - name: GIT_USER
+                  valueFrom:
+                    secretKeyRef:
+                      name: cni-results-git-credentials
+                      key: GIT_USER
+                - name: GIT_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: cni-results-git-credentials
+                      key: GIT_TOKEN
+              resources:
+                requests:
+                  cpu: "200m"
+                  memory: "256Mi"
+                limits:
+                  cpu: "1000m"
+                  memory: "1024Mi"

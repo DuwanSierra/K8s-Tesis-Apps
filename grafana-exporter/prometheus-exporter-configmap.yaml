@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cni-resource-exporter-config
+  namespace: cni-test
+  labels:
+    app.kubernetes.io/part-of: cni-test
+    component: resource-observability
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+data:
+  # Endpoint interno de Prometheus del kube-prometheus-stack
+  PROMETHEUS_URL: "http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090"
+
+  # Ventana de exportacion (antes + durante + despues). Debe ser mayor al total de pruebas.
+  # Con los horarios actuales, 45 min cubre margen suficiente.
+  EXPORT_WINDOW_MINUTES: "45"
+
+  # Resolucion temporal de consulta en query_range.
+  QUERY_STEP: "30s"
+
+  # Ruta base para guardar artefactos dentro del repositorio de resultados.
+  # Se respeta la jerarquia por CNI para comparativas.
+  RESOURCE_RESULTS_SUBPATH: "resource_usage_nodes"
+
+  # Retencion de exportaciones por CNI (carpetas timestamp)
+  RETENTION_MAX_EXPORTS: "8"

@@ -18,10 +18,9 @@ metadata:
     # Documentación: primera ejecución ocurre dentro de 10 min tras el deploy
     cni-test/description: "Prueba de throughput L3 con iperf3 – 5 min / intervalo 10 s / JSON"
 spec:
-  # Disparo: cada 6 minutos.
-  # Primera ejecución garantizada dentro de los 6 min post-instalación.
-  # Para uso periódico en investigación se puede cambiar a "@hourly" o "0 */6 * * *".
-  schedule: "*/6 * * * *"
+  # Disparo en dos ventanas por hora para evitar solape con otras pruebas.
+  # Ventanas objetivo: minuto 0 y 30.
+  schedule: "0,30 * * * *"
 
   # Si el Job anterior todavía corre (p.ej. fallo de red) no lanzar otro en paralelo.
   concurrencyPolicy: Forbid

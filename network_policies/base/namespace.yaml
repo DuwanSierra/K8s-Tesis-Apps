@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cni-np-test
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+  labels:
+    app.kubernetes.io/part-of: cni-np-test
+    purpose: network-policy-benchmark
+    kubernetes.io/metadata.name: cni-np-test

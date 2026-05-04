@@ -1,0 +1,45 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Antrea – ClusterNetworkPolicy en Tier SecurityOps (Diferenciador Exclusivo)
+#
+# Antrea organiza las políticas en 5 niveles de prioridad (Tiers):
+#   Emergency > SecurityOps > NetworkOps > Platform > Application
+#
+# Este ClusterNetworkPolicy actúa en el Tier "securityops" con máxima prioridad
+# sobre las NetworkPolicies estándar de namespace. Simula una "regla corporativa"
+# que el equipo de seguridad aplica a TODA la organización y que los desarrolladores
+# no pueden sobrescribir con políticas de namespace.
+#
+# Caso de uso real: cumplimiento normativo ISO 27001 / SOC2 donde el equipo de
+# SecOps establece reglas obligatorias de red independientes de los desarrolladores.
+#
+# Equivalente en Calico/Cilium: GlobalNetworkPolicy (Calico) o ClusterWideNetworkPolicy
+# no tienen el mismo concepto jerárquico de Tiers con prioridades explícitas.
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: crd.antrea.io/v1beta1
+kind: ClusterNetworkPolicy
+metadata:
+  name: securityops-block-database-exfiltration
+  labels:
+    use-case: multi-tier
+    cni: antrea
+    tier: securityops
+    app.kubernetes.io/part-of: cni-np-test
+  annotations:
+    cni-test/description: "Regla corporativa en Tier SecurityOps: la DB no puede comunicarse con el exterior"
+spec:
+  priority: 10
+  tier: securityops
+  appliedTo:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: cni-np-test
+      podSelector:
+        matchLabels:
+          tier: database
+  egress:
+    # La base de datos no puede iniciar ninguna conexión saliente
+    # Esta regla tiene precedencia sobre cualquier NetworkPolicy de namespace
+    - action: Drop
+      to:
+        - ipBlock:
+            cidr: 0.0.0.0/0

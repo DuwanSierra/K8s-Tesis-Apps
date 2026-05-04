@@ -1,0 +1,21 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: cni-np-test
+
+resources:
+  - ../../../base
+  - ../../../use-case-3-egress-block
+
+patches:
+  - patch: |-
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: cni-np-results-git-config
+      data:
+        CNI_NAME: "cilium"
+        NP_CASE: "egress_block"
+    target:
+      kind: ConfigMap
+      name: cni-np-results-git-config

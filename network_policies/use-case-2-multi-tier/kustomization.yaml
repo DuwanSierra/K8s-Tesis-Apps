@@ -1,0 +1,10 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: cni-np-test
+
+resources:
+  - np-frontend.yaml
+  - np-backend.yaml
+  - np-database.yaml
+  - np-allow-benchmark.yaml

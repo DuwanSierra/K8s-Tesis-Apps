@@ -1,0 +1,33 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Multi-Tier – Database (tier=database)
+#
+# Solo acepta ingress desde backend. Sin egress (contención total de datos).
+# Demuestra que la capa de datos es completamente inaccesible desde fuera
+# del flujo frontend → backend → database.
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: np-database
+  namespace: cni-np-test
+  labels:
+    use-case: multi-tier
+    app.kubernetes.io/part-of: cni-np-test
+spec:
+  podSelector:
+    matchLabels:
+      tier: database
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Solo acepta tráfico desde backend
+    - from:
+        - podSelector:
+            matchLabels:
+              tier: backend
+      ports:
+        - protocol: TCP
+          port: 80
+  egress: []
+  # Sin egress: la base de datos no inicia conexiones salientes (contención máxima)

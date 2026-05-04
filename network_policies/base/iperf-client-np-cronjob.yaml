@@ -1,0 +1,251 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# iperf3 Client NP – CronJob (namespace: cni-np-test)
+#
+# Idéntico al iperf-client-cronjob de cni-test con tres diferencias:
+#   1. Apunta a iperf3-server-np.cni-np-test.svc.cluster.local
+#   2. Guarda en: results/cni-benchmarks/<CNI>/with_network_policy/<NP_CASE>/throughput_tcp/
+#   3. Incluye "network_policy_case" en el JSON para el procesador.js
+#
+# Schedule: 15,45 (no solapa con baseline en :00/:30, ni con latencia NP en :21/:51)
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: iperf3-client-np
+  namespace: cni-np-test
+  labels:
+    app: iperf3-client-np
+    role: benchmark-client
+    component: network-policy-benchmark
+    app.kubernetes.io/part-of: cni-np-test
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+    cni-test/description: "Throughput TCP con Network Policy activa – 5 min / JSON / retención 5"
+spec:
+  schedule: "15,45 * * * *"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 120
+  successfulJobsHistoryLimit: 5
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      ttlSecondsAfterFinished: 3600
+      template:
+        metadata:
+          labels:
+            app: iperf3-client-np
+            role: benchmark-client
+            component: network-policy-benchmark
+        spec:
+          restartPolicy: Never
+          affinity:
+            podAntiAffinity:
+              preferredDuringSchedulingIgnoredDuringExecution:
+                - weight: 100
+                  podAffinityTerm:
+                    labelSelector:
+                      matchLabels:
+                        app: iperf3-server-np
+                    topologyKey: "kubernetes.io/hostname"
+          initContainers:
+            - name: wait-for-server
+              image: busybox:1.36
+              command:
+                - sh
+                - -c
+                - |
+                  echo "[init] Esperando DNS iperf3-server-np..."
+                  until nslookup iperf3-server-np.cni-np-test.svc.cluster.local >/dev/null 2>&1; do
+                    echo "[init] DNS aun no disponible, reintentando en 5s...";
+                    sleep 5;
+                  done
+                  echo "[init] DNS listo."
+              resources:
+                requests:
+                  cpu: "10m"
+                  memory: "16Mi"
+                limits:
+                  cpu: "50m"
+                  memory: "32Mi"
+          containers:
+            - name: iperf3-client-np
+              image: alpine:3.20
+              command:
+                - sh
+                - -c
+                - |
+                  set -eu
+
+                  CURRENT_STEP="bootstrap"
+
+                  log() {
+                    printf '%s [%-5s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "$2"
+                  }
+
+                  step() {
+                    CURRENT_STEP="$1"
+                    log INFO "${CURRENT_STEP}"
+                  }
+
+                  on_exit() {
+                    rc="$?"
+                    if [ "${rc}" -ne 0 ]; then
+                      log ERROR "Fallo en paso: ${CURRENT_STEP} (exit=${rc})"
+                      nslookup iperf3-server-np.cni-np-test.svc.cluster.local 2>&1 | sed 's/^/[diag] /' || true
+                      nc -vz iperf3-server-np.cni-np-test.svc.cluster.local 5201 2>&1 | sed 's/^/[diag] /' || true
+                      if [ -n "${RAW_IPERF_FILE:-}" ] && [ -f "${RAW_IPERF_FILE}" ]; then
+                        tail -n 20 "${RAW_IPERF_FILE}" | sed 's/^/[iperf3] /' || true
+                      fi
+                      echo "[debug] Manteniendo pod ${DEBUG_HOLD_SECONDS}s para inspeccion..."
+                      sleep "${DEBUG_HOLD_SECONDS}"
+                    else
+                      log INFO "Ejecucion finalizada correctamente"
+                    fi
+                    exit "${rc}"
+                  }
+                  trap 'on_exit' EXIT
+
+                  step "Instalando dependencias"
+                  apk add --no-cache iperf3 git ca-certificates jq >/dev/null
+
+                  step "Preparando rutas y nombres de salida"
+                  TS="$(date -u +%Y%m%dT%H%M%SZ)"
+                  OUTPUT_DIR="/tmp/results/iperf3-np"
+                  RAW_IPERF_FILE="${OUTPUT_DIR}/raw_iperf3_${CNI_NAME}_${NP_CASE}_${TS}.json"
+                  RUN_FILE="${OUTPUT_DIR}/run_iperf3_np_${CNI_NAME}_${NP_CASE}_${TS}.json"
+                  TEST_TYPE="throughput_tcp"
+                  TARGET_HOST="iperf3-server-np.cni-np-test.svc.cluster.local"
+                  TARGET_PORT="5201"
+                  RETENTION_MAX_RUNS="5"
+
+                  mkdir -p "${OUTPUT_DIR}"
+
+                  step "Ejecutando prueba iperf3 con NP activa (${NP_CASE})"
+                  iperf3 \
+                    -c "${TARGET_HOST}" \
+                    -p "${TARGET_PORT}" \
+                    -t 300 \
+                    -i 10 \
+                    -J > "${RAW_IPERF_FILE}"
+
+                  step "Generando JSON normalizado de corrida"
+                  SENDER_BPS="$(jq -r '.end.sum_sent.bits_per_second // 0' "${RAW_IPERF_FILE}")"
+                  RECEIVER_BPS="$(jq -r '.end.sum_received.bits_per_second // 0' "${RAW_IPERF_FILE}")"
+                  RETRANSMITS="$(jq -r '.end.sum_sent.retransmits // 0' "${RAW_IPERF_FILE}")"
+                  DURATION_SECONDS="$(jq -r '.end.sum_received.seconds // .start.test_start.duration // 300' "${RAW_IPERF_FILE}")"
+
+                  cat > "${RUN_FILE}" <<EOF
+                  {
+                    "timestamp_utc": "${TS}",
+                    "benchmark_type": "${TEST_TYPE}",
+                    "cni_name": "${CNI_NAME}",
+                    "network_policy_case": "${NP_CASE}",
+                    "namespace": "cni-np-test",
+                    "source": "cronjob/iperf3-client-np",
+                    "measurement_human": {
+                      "objective": "Medir throughput TCP con Network Policy activa (caso: ${NP_CASE})",
+                      "what_is_measured": "bits_per_second de envio y recepcion, retransmisiones TCP",
+                      "topology_hint": "inter-nodo por anti-affinity preferente",
+                      "traffic_profile": "iperf3 -t 300 -i 10 -J",
+                      "target": "${TARGET_HOST}:${TARGET_PORT}",
+                      "decision_usage": "Calcular overhead de seguridad vs baseline sin NP"
+                    },
+                    "summary": {
+                      "duration_seconds": ${DURATION_SECONDS},
+                      "sender_bits_per_second": ${SENDER_BPS},
+                      "receiver_bits_per_second": ${RECEIVER_BPS},
+                      "retransmits": ${RETRANSMITS}
+                    },
+                    "raw":
+                  $(cat "${RAW_IPERF_FILE}")
+                  }
+                  EOF
+
+                  step "Configurando autenticacion Git"
+                  export GIT_TERMINAL_PROMPT=0
+                  export GIT_ASKPASS=/tmp/git-askpass.sh
+                  cat > "${GIT_ASKPASS}" <<'EOF'
+                  #!/bin/sh
+                  case "$1" in
+                    *Username*) echo "$GIT_USER" ;;
+                    *Password*) echo "$GIT_TOKEN" ;;
+                  esac
+                  EOF
+                  chmod 700 "${GIT_ASKPASS}"
+
+                  step "Clonando repositorio de resultados"
+                  rm -rf /tmp/repo
+                  git clone --depth 1 --branch "${GIT_BRANCH}" "${GIT_REPO_URL}" /tmp/repo
+
+                  step "Copiando artifacts al repositorio"
+                  DEST_DIR="/tmp/repo/${GIT_RESULTS_PATH}/${CNI_NAME}/with_network_policy/${NP_CASE}/${TEST_TYPE}"
+                  mkdir -p "${DEST_DIR}"
+                  cp "${RUN_FILE}" "${DEST_DIR}/run_${TS}.json"
+
+                  step "Aplicando retencion maxima de ${RETENTION_MAX_RUNS} corridas"
+                  cd "${DEST_DIR}"
+                  ls -1t run_*.json 2>/dev/null | awk "NR>${RETENTION_MAX_RUNS}" | xargs -r rm -f
+
+                  step "Commit y push de resultados"
+                  cd /tmp/repo
+                  git config user.name "${GIT_AUTHOR_NAME}"
+                  git config user.email "${GIT_AUTHOR_EMAIL}"
+                  git add "${GIT_RESULTS_PATH}/${CNI_NAME}/with_network_policy/${NP_CASE}/${TEST_TYPE}"
+                  git commit -m "results(np-throughput): ${CNI_NAME}/${NP_CASE} ${TS} (max5)" || true
+                  git push origin "${GIT_BRANCH}"
+              env:
+                - name: GIT_REPO_URL
+                  valueFrom:
+                    configMapKeyRef:
+                      name: cni-np-results-git-config
+                      key: GIT_REPO_URL
+                - name: GIT_BRANCH
+                  valueFrom:
+                    configMapKeyRef:
+                      name: cni-np-results-git-config
+                      key: GIT_BRANCH
+                - name: GIT_RESULTS_PATH
+                  valueFrom:
+                    configMapKeyRef:
+                      name: cni-np-results-git-config
+                      key: GIT_RESULTS_PATH
+                - name: GIT_AUTHOR_NAME
+                  valueFrom:
+                    configMapKeyRef:
+                      name: cni-np-results-git-config
+                      key: GIT_AUTHOR_NAME
+                - name: GIT_AUTHOR_EMAIL
+                  valueFrom:
+                    configMapKeyRef:
+                      name: cni-np-results-git-config
+                      key: GIT_AUTHOR_EMAIL
+                - name: CNI_NAME
+                  valueFrom:
+                    configMapKeyRef:
+                      name: cni-np-results-git-config
+                      key: CNI_NAME
+                - name: NP_CASE
+                  valueFrom:
+                    configMapKeyRef:
+                      name: cni-np-results-git-config
+                      key: NP_CASE
+                - name: GIT_USER
+                  valueFrom:
+                    secretKeyRef:
+                      name: cni-results-git-credentials
+                      key: GIT_USER
+                - name: GIT_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: cni-results-git-credentials
+                      key: GIT_TOKEN
+                - name: DEBUG_HOLD_SECONDS
+                  value: "600"
+              resources:
+                requests:
+                  cpu: "100m"
+                  memory: "64Mi"
+                limits:
+                  cpu: "1000m"
+                  memory: "128Mi"

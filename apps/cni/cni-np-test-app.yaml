@@ -1,0 +1,34 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# ArgoCD Application – Network Policy Benchmark
+#
+# Gestiona el namespace cni-np-test con las NPs del caso de uso activo.
+# El path se construye como: network_policies/overlays/<cni>/<use-case>
+#
+# Este manifest es referencial. El path real lo inyecta Terraform vía
+# la variable cni_np_use_case (zero-trust | multi-tier | egress-block).
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: cni-np-test
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/DuwanSierra/K8s-Tesis-Apps.git
+    targetRevision: HEAD
+    # Path ejemplo para calico/zero-trust.
+    # Terraform sobreescribe este path con: network_policies/overlays/<cni>/<use-case>
+    path: network_policies/overlays/calico/zero-trust
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: cni-np-test
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

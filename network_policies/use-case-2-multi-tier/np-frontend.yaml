@@ -1,0 +1,45 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Multi-Tier – Frontend (tier=frontend)
+#
+# Acepta ingress HTTP desde cualquier origen (simula exposición al usuario).
+# Solo puede comunicarse hacia backend en puerto 80.
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: np-frontend
+  namespace: cni-np-test
+  labels:
+    use-case: multi-tier
+    app.kubernetes.io/part-of: cni-np-test
+spec:
+  podSelector:
+    matchLabels:
+      tier: frontend
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Acepta tráfico HTTP desde cualquier origen (punto de entrada público)
+    - ports:
+        - protocol: TCP
+          port: 80
+  egress:
+    # Solo puede hablar con backend en puerto 80
+    - to:
+        - podSelector:
+            matchLabels:
+              tier: backend
+      ports:
+        - protocol: TCP
+          port: 80
+    # DNS para resolución de nombres de servicios
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

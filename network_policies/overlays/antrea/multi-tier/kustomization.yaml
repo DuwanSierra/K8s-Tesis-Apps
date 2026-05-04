@@ -1,0 +1,23 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: cni-np-test
+
+resources:
+  - ../../../base
+  - ../../../use-case-2-multi-tier
+  # AntreaClusterNetworkPolicy en Tier SecurityOps: diferenciador exclusivo de Antrea
+  - antrea-security-tier.yaml
+
+patches:
+  - patch: |-
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: cni-np-results-git-config
+      data:
+        CNI_NAME: "antrea"
+        NP_CASE: "multi_tier"
+    target:
+      kind: ConfigMap
+      name: cni-np-results-git-config

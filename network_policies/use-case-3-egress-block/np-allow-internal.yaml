@@ -1,0 +1,36 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Egress Block – Permitir tráfico interno del clúster
+#
+# Los pods de la aplicación (tier=*) pueden comunicarse dentro del clúster
+# (rangos RFC1918). Esto permite la comunicación entre microservicios sin
+# romper la arquitectura multi-tier.
+#
+# Validación: kubectl exec <frontend-pod> -- curl http://demo-backend/ → DEBE PASAR
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-internal-egress
+  namespace: cni-np-test
+  labels:
+    use-case: egress-block
+    app.kubernetes.io/part-of: cni-np-test
+spec:
+  podSelector:
+    matchExpressions:
+      - key: tier
+        operator: In
+        values: [frontend, backend, database]
+  policyTypes:
+    - Egress
+  egress:
+    # Tráfico hacia rangos privados del clúster (pods + servicios en K3s DO)
+    - to:
+        - ipBlock:
+            cidr: 10.0.0.0/8
+    - to:
+        - ipBlock:
+            cidr: 172.16.0.0/12
+    - to:
+        - ipBlock:
+            cidr: 192.168.0.0/16

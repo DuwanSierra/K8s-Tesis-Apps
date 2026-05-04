@@ -1,0 +1,75 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Multi-Tier – Excepción de Benchmark
+#
+# Los pods de benchmark (role=benchmark-client y role=benchmark-server) no tienen
+# NP de tier aplicada. Sin embargo, para garantizar que el deny-all implícito
+# de K8s no interfiera (cuando el pod sí es seleccionado por otra NP),
+# se define explícitamente la comunicación entre los pods de medición.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Permite ingress al servidor iperf desde el cliente benchmark
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-iperf-server-ingress-mt
+  namespace: cni-np-test
+  labels:
+    use-case: multi-tier
+    app.kubernetes.io/part-of: cni-np-test
+spec:
+  podSelector:
+    matchLabels:
+      app: iperf3-server-np
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              role: benchmark-client
+      ports:
+        - protocol: TCP
+          port: 5201
+---
+# Permite al cliente benchmark egress hacia iperf, DNS y git push
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-benchmark-client-egress-mt
+  namespace: cni-np-test
+  labels:
+    use-case: multi-tier
+    app.kubernetes.io/part-of: cni-np-test
+spec:
+  podSelector:
+    matchLabels:
+      role: benchmark-client
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: iperf3-server-np
+      ports:
+        - protocol: TCP
+          port: 5201
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443

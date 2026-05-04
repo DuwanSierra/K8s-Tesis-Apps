@@ -1,0 +1,34 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Egress Block – Bloqueo de Egress Externo para Pods de Aplicación
+#
+# Implementa una política de deny-all para pods de la aplicación (tier=*).
+# Con las reglas de allow-dns y allow-internal activas, el resultado neto es:
+#   ✅ PERMITIDO: tráfico interno del clúster (RFC1918)
+#   ✅ PERMITIDO: resolución DNS interna
+#   ❌ BLOQUEADO: cualquier IP pública (Internet) → simula contención de amenazas
+#
+# Caso de uso: prevenir exfiltración de datos o cryptominers desde pods comprometidos.
+#
+# Validación:
+#   ✅ kubectl exec <demo-pod> -- nslookup kubernetes.default → DEBE PASAR
+#   ❌ kubectl exec <demo-pod> -- curl https://google.com → DEBE FALLAR (timeout)
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: block-external-egress-app
+  namespace: cni-np-test
+  labels:
+    use-case: egress-block
+    app.kubernetes.io/part-of: cni-np-test
+spec:
+  podSelector:
+    matchExpressions:
+      - key: tier
+        operator: In
+        values: [frontend, backend, database]
+  policyTypes:
+    - Egress
+  # egress vacío = deny all egress para estos pods
+  # La combinación con allow-dns y allow-internal produce el efecto neto esperado
+  egress: []

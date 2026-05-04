@@ -1,0 +1,74 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Egress Block – Excepción de Benchmark
+#
+# Los pods de benchmark necesitan:
+#   1. Egress al servidor iperf en el mismo namespace (tráfico de medición)
+#   2. Egress a internet HTTPS 443 para git push de resultados a GitHub
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Servidor iperf: acepta ingress desde el cliente benchmark
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-iperf-server-ingress-eb
+  namespace: cni-np-test
+  labels:
+    use-case: egress-block
+    app.kubernetes.io/part-of: cni-np-test
+spec:
+  podSelector:
+    matchLabels:
+      app: iperf3-server-np
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              role: benchmark-client
+      ports:
+        - protocol: TCP
+          port: 5201
+---
+# Cliente benchmark: egress completo necesario para medir y reportar
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-benchmark-client-egress-eb
+  namespace: cni-np-test
+  labels:
+    use-case: egress-block
+    app.kubernetes.io/part-of: cni-np-test
+spec:
+  podSelector:
+    matchLabels:
+      role: benchmark-client
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: iperf3-server-np
+      ports:
+        - protocol: TCP
+          port: 5201
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443

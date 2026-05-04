@@ -1,0 +1,19 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Zero Trust – Denegación por Defecto
+#
+# Bloquea TODO el tráfico Ingress y Egress en cni-np-test.
+# Las excepciones explícitas están en np-allow-iperf.yaml.
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: deny-all-ingress-egress
+  namespace: cni-np-test
+  labels:
+    use-case: zero-trust
+    app.kubernetes.io/part-of: cni-np-test
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress

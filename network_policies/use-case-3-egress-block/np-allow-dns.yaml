@@ -1,0 +1,28 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Egress Block – Permitir DNS para todos los pods
+#
+# Permite la resolución DNS interna (CoreDNS en kube-system).
+# Sin esta regla, ningún pod podría resolver nombres de servicio.
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: cni-np-test
+  labels:
+    use-case: egress-block
+    app.kubernetes.io/part-of: cni-np-test
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

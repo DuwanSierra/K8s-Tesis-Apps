@@ -1,0 +1,39 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Cilium – CiliumNetworkPolicy L7 (Diferenciador Exclusivo)
+#
+# Complementa las K8s NetworkPolicies estándar del use-case-2 con filtrado
+# HTTP a nivel L7. Permite solo GET desde frontend hacia backend.
+# Esto demuestra la capacidad única de Cilium: inspección de protocolo HTTP
+# sin un service mesh, usando eBPF nativo.
+#
+# Equivalente en Calico/Antrea: no existe sin Envoy/Istio.
+# Valor para la tesis: diferenciador técnico clave en arquitecturas zero-trust
+# de microservicios con APIs REST.
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: cilium-l7-http-frontend-to-backend
+  namespace: cni-np-test
+  labels:
+    use-case: multi-tier
+    cni: cilium
+    app.kubernetes.io/part-of: cni-np-test
+spec:
+  endpointSelector:
+    matchLabels:
+      tier: backend
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            tier: frontend
+      toPorts:
+        - ports:
+            - port: "80"
+              protocol: TCP
+          rules:
+            http:
+              # Solo métodos de lectura permitidos desde el frontend
+              # Bloquea POST, PUT, DELETE, PATCH → previene modificación no autorizada
+              - method: "GET"
+              - method: "HEAD"

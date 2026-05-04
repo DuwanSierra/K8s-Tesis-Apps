@@ -71,9 +71,27 @@ spec:
                   END_EPOCH="$(date -u +%s)"
                   START_EPOCH="$((END_EPOCH - (EXPORT_WINDOW_MINUTES * 60)))"
 
+                  # Queries de nodo (métricas de infraestructura general)
                   PROM_QUERY_CPU='100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[2m])))'
                   PROM_QUERY_MEM_PCT='100 * (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes))'
                   PROM_QUERY_MEM_USED='(node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes)'
+
+                  # Determinar el patrón de pod del CNI activo para medir overhead específico del CNI
+                  # Criterio C2 del Marco de Evaluación: CPU overhead del CNI (%) y RAM por nodo (MB)
+                  case "${CNI_NAME}" in
+                    calico)  CNI_POD_PATTERN="calico-node-.*" ;;
+                    cilium)  CNI_POD_PATTERN="cilium-.*" ;;
+                    antrea)  CNI_POD_PATTERN="antrea-agent-.*" ;;
+                    flannel) CNI_POD_PATTERN="kube-flannel-.*" ;;
+                    *)       CNI_POD_PATTERN="" ;;
+                  esac
+
+                  # CPU del pod CNI: tasa de uso de CPU en cores (promedio por nodo donde el pod corre)
+                  # Se multiplica por 100 para obtener porcentaje de un core; dividir por nCPU para % total del nodo
+                  PROM_QUERY_CNI_POD_CPU="sum by (pod, node) (rate(container_cpu_usage_seconds_total{pod=~\"${CNI_POD_PATTERN}\",container!=\"\",container!=\"POD\"}[2m]))"
+
+                  # RAM del pod CNI: working set en bytes (memoria activa, excluye cache de página)
+                  PROM_QUERY_CNI_POD_MEM="sum by (pod, node) (container_memory_working_set_bytes{pod=~\"${CNI_POD_PATTERN}\",container!=\"\",container!=\"POD\"})"
 
                   BASE_DIR="/tmp/export/${TS}"
                   RAW_DIR="${BASE_DIR}/raw"
@@ -191,15 +209,27 @@ spec:
                     done
                   }
 
-                  step "Consultando Prometheus (raw JSON)"
+                  step "Consultando Prometheus – metricas de nodo (raw JSON)"
                   query_range_to_raw "$PROM_QUERY_CPU" "${RAW_DIR}/cpu_pct_raw.json"
                   query_range_to_raw "$PROM_QUERY_MEM_PCT" "${RAW_DIR}/mem_pct_raw.json"
                   query_range_to_raw "$PROM_QUERY_MEM_USED" "${RAW_DIR}/mem_used_bytes_raw.json"
+
+                  step "Consultando Prometheus – metricas del pod CNI (Criterio C2)"
+                  if [ -n "${CNI_POD_PATTERN}" ]; then
+                    query_range_to_raw "$PROM_QUERY_CNI_POD_CPU" "${RAW_DIR}/cni_pod_cpu_cores_raw.json"
+                    query_range_to_raw "$PROM_QUERY_CNI_POD_MEM" "${RAW_DIR}/cni_pod_mem_bytes_raw.json"
+                  else
+                    echo '{"status":"skipped","data":{"result":[]}}' > "${RAW_DIR}/cni_pod_cpu_cores_raw.json"
+                    echo '{"status":"skipped","data":{"result":[]}}' > "${RAW_DIR}/cni_pod_mem_bytes_raw.json"
+                    log INFO "CNI_POD_PATTERN vacio, saltando consultas de pod CNI"
+                  fi
 
                   step "Convirtiendo a TSV/CSV"
                   raw_to_tsv "${RAW_DIR}/cpu_pct_raw.json" "${CSV_DIR}/cpu_pct.tsv"
                   raw_to_tsv "${RAW_DIR}/mem_pct_raw.json" "${CSV_DIR}/mem_pct.tsv"
                   raw_to_tsv "${RAW_DIR}/mem_used_bytes_raw.json" "${CSV_DIR}/mem_used_bytes.tsv"
+                  raw_to_tsv "${RAW_DIR}/cni_pod_cpu_cores_raw.json" "${CSV_DIR}/cni_pod_cpu_cores.tsv"
+                  raw_to_tsv "${RAW_DIR}/cni_pod_mem_bytes_raw.json" "${CSV_DIR}/cni_pod_mem_bytes.tsv"
 
                   {
                     echo -e "epoch\tnode\tvalue"
@@ -213,6 +243,14 @@ spec:
                     echo -e "epoch\tnode\tvalue_bytes"
                     cat "${CSV_DIR}/mem_used_bytes.tsv"
                   } > "${CSV_DIR}/mem_used_bytes.csv"
+                  {
+                    echo -e "epoch\tpod\tcpu_cores"
+                    cat "${CSV_DIR}/cni_pod_cpu_cores.tsv"
+                  } > "${CSV_DIR}/cni_pod_cpu_cores.csv"
+                  {
+                    echo -e "epoch\tpod\tmem_bytes"
+                    cat "${CSV_DIR}/cni_pod_mem_bytes.tsv"
+                  } > "${CSV_DIR}/cni_pod_mem_bytes.csv"
 
                   step "Generando resumen humano"
                   write_summary_md \
@@ -221,10 +259,59 @@ spec:
                     "${CSV_DIR}/mem_used_bytes.tsv" \
                     "${HUMAN_DIR}/summary_${TS}.md"
 
+                  # Agregar resumen de métricas del pod CNI al summary
+                  {
+                    echo
+                    echo "## CNI Pod CPU (cores – Criterio C2)"
+                    echo
+                    echo "- cni_name: ${CNI_NAME}"
+                    echo "- cni_pod_pattern: ${CNI_POD_PATTERN}"
+                    echo
+                    echo "| pod | avg_cpu_cores | max_cpu_cores |"
+                    echo "|---|---:|---:|"
+                    if [ -s "${CSV_DIR}/cni_pod_cpu_cores.tsv" ]; then
+                      awk '
+                        {sum[$2]+=$3; cnt[$2]+=1; if ($3>max[$2]) max[$2]=$3}
+                        END {
+                          for (p in cnt) {
+                            printf("| %s | %.6f | %.6f |\n", p, sum[p]/cnt[p], max[p])
+                          }
+                        }
+                      ' "${CSV_DIR}/cni_pod_cpu_cores.tsv" | sort
+                    else
+                      echo "| (sin datos) | N/A | N/A |"
+                    fi
+                    echo
+                    echo "## CNI Pod Memoria (MiB – Criterio C2)"
+                    echo
+                    echo "| pod | avg_mem_mib | max_mem_mib |"
+                    echo "|---|---:|---:|"
+                    if [ -s "${CSV_DIR}/cni_pod_mem_bytes.tsv" ]; then
+                      awk '
+                        {
+                          v=$3/1024/1024;
+                          sum[$2]+=v; cnt[$2]+=1;
+                          if (v>max[$2]) max[$2]=v
+                        }
+                        END {
+                          for (p in cnt) {
+                            printf("| %s | %.3f | %.3f |\n", p, sum[p]/cnt[p], max[p])
+                          }
+                        }
+                      ' "${CSV_DIR}/cni_pod_mem_bytes.tsv" | sort
+                    else
+                      echo "| (sin datos) | N/A | N/A |"
+                    fi
+                  } >> "${HUMAN_DIR}/summary_${TS}.md"
+
                   step "Renderizando imagenes PNG"
                   render_png_per_node "${CSV_DIR}/cpu_pct.tsv" "cpu_pct" "% CPU" "${IMG_DIR}"
                   render_png_per_node "${CSV_DIR}/mem_pct.tsv" "mem_pct" "% Mem" "${IMG_DIR}"
                   render_png_per_node "${CSV_DIR}/mem_used_bytes.tsv" "mem_used_mib" "Bytes" "${IMG_DIR}"
+                  if [ -s "${CSV_DIR}/cni_pod_cpu_cores.tsv" ]; then
+                    render_png_per_node "${CSV_DIR}/cni_pod_cpu_cores.tsv" "cni_pod_cpu_cores" "CPU Cores" "${IMG_DIR}"
+                    render_png_per_node "${CSV_DIR}/cni_pod_mem_bytes.tsv" "cni_pod_mem_bytes" "Bytes" "${IMG_DIR}"
+                  fi
 
                   step "Configurando autenticacion Git"
                   export GIT_TERMINAL_PROMPT=0
@@ -249,6 +336,28 @@ spec:
                   cp -r "${CSV_DIR}" "${DEST_DIR}/csv"
                   cp -r "${IMG_DIR}" "${DEST_DIR}/images"
                   cp -r "${HUMAN_DIR}" "${DEST_DIR}/human"
+
+                  # Generar summary JSON legible por procesador.js para Criterio C2
+                  CNI_POD_CPU_AVG="null"
+                  CNI_POD_MEM_AVG_MIB="null"
+                  if [ -s "${CSV_DIR}/cni_pod_cpu_cores.tsv" ]; then
+                    CNI_POD_CPU_AVG="$(awk '{sum+=$3; cnt+=1} END {printf "%.6f", sum/cnt}' "${CSV_DIR}/cni_pod_cpu_cores.tsv")"
+                  fi
+                  if [ -s "${CSV_DIR}/cni_pod_mem_bytes.tsv" ]; then
+                    CNI_POD_MEM_AVG_MIB="$(awk '{sum+=$3/1024/1024; cnt+=1} END {printf "%.3f", sum/cnt}' "${CSV_DIR}/cni_pod_mem_bytes.tsv")"
+                  fi
+                  cat > "${DEST_DIR}/cni_resource_summary.json" <<EOF
+                  {
+                    "timestamp_utc": "${TS}",
+                    "cni_name": "${CNI_NAME}",
+                    "cni_pod_pattern": "${CNI_POD_PATTERN}",
+                    "export_window_minutes": ${EXPORT_WINDOW_MINUTES},
+                    "criterio_c2": {
+                      "cni_pod_cpu_avg_cores": ${CNI_POD_CPU_AVG},
+                      "cni_pod_mem_avg_mib": ${CNI_POD_MEM_AVG_MIB}
+                    }
+                  }
+                  EOF
 
                   step "Aplicando retencion por CNI"
                   RETENTION_ROOT="/tmp/repo/${GIT_RESULTS_PATH}/${CNI_NAME}/${RESOURCE_RESULTS_SUBPATH}"

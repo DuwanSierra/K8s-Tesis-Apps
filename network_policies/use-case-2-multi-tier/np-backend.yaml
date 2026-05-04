@@ -1,0 +1,49 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Multi-Tier – Backend (tier=backend)
+#
+# Solo acepta ingress desde frontend. Solo puede comunicarse con database.
+# Demuestra micro-segmentación: la capa de lógica no es accesible directamente.
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: np-backend
+  namespace: cni-np-test
+  labels:
+    use-case: multi-tier
+    app.kubernetes.io/part-of: cni-np-test
+spec:
+  podSelector:
+    matchLabels:
+      tier: backend
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Solo acepta tráfico desde el tier frontend
+    - from:
+        - podSelector:
+            matchLabels:
+              tier: frontend
+      ports:
+        - protocol: TCP
+          port: 80
+  egress:
+    # Solo puede hablar con database
+    - to:
+        - podSelector:
+            matchLabels:
+              tier: database
+      ports:
+        - protocol: TCP
+          port: 80
+    # DNS
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

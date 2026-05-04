@@ -1,0 +1,291 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Latency Client NP – CronJob (namespace: cni-np-test)
+#
+# Mide latencia TCP connect contra iperf3-server-np con NPs activas.
+# Guarda en: results/cni-benchmarks/<CNI>/with_network_policy/<NP_CASE>/latency_tcp_connect/
+#
+# Schedule: 21,51 (después de iperf NP en :15/:45 que dura 5 min → termina :20/:50)
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: latency-client-np
+  namespace: cni-np-test
+  labels:
+    app: latency-client-np
+    role: benchmark-client
+    component: network-policy-benchmark
+    app.kubernetes.io/part-of: cni-np-test
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+    cni-test/description: "Latencia TCP connect con Network Policy activa – 30 muestras / JSON"
+spec:
+  schedule: "21,51 * * * *"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 120
+  successfulJobsHistoryLimit: 5
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      ttlSecondsAfterFinished: 3600
+      template:
+        metadata:
+          labels:
+            app: latency-client-np
+            role: benchmark-client
+            component: network-policy-benchmark
+        spec:
+          restartPolicy: Never
+          affinity:
+            podAntiAffinity:
+              preferredDuringSchedulingIgnoredDuringExecution:
+                - weight: 100
+                  podAffinityTerm:
+                    labelSelector:
+                      matchLabels:
+                        app: iperf3-server-np
+                    topologyKey: "kubernetes.io/hostname"
+          initContainers:
+            - name: wait-for-server
+              image: busybox:1.36
+              command:
+                - sh
+                - -c
+                - |
+                  echo "[init] Esperando DNS iperf3-server-np..."
+                  until nslookup iperf3-server-np.cni-np-test.svc.cluster.local >/dev/null 2>&1; do
+                    echo "[init] DNS aun no disponible, reintentando en 5s...";
+                    sleep 5;
+                  done
+                  echo "[init] DNS listo. Iniciando prueba de latencia."
+              resources:
+                requests:
+                  cpu: "10m"
+                  memory: "16Mi"
+                limits:
+                  cpu: "50m"
+                  memory: "32Mi"
+          containers:
+            - name: latency-client-np
+              image: alpine:3.20
+              command:
+                - sh
+                - -c
+                - |
+                  set -eu
+
+                  CURRENT_STEP="bootstrap"
+
+                  log() {
+                    printf '%s [%-5s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "$2"
+                  }
+
+                  step() {
+                    CURRENT_STEP="$1"
+                    log INFO "${CURRENT_STEP}"
+                  }
+
+                  on_exit() {
+                    rc="$?"
+                    if [ "${rc}" -ne 0 ]; then
+                      log ERROR "Fallo en paso: ${CURRENT_STEP} (exit=${rc})"
+                      nslookup iperf3-server-np.cni-np-test.svc.cluster.local 2>&1 | sed 's/^/[diag] /' || true
+                      nc -vz iperf3-server-np.cni-np-test.svc.cluster.local 5201 2>&1 | sed 's/^/[diag] /' || true
+                      if [ -n "${RUN_FILE:-}" ] && [ -f "${RUN_FILE}" ]; then
+                        tail -n 20 "${RUN_FILE}" | sed 's/^/[json] /' || true
+                      fi
+                      echo "[debug] Manteniendo pod ${DEBUG_HOLD_SECONDS}s para inspeccion..."
+                      sleep "${DEBUG_HOLD_SECONDS}"
+                    else
+                      log INFO "Ejecucion finalizada correctamente"
+                    fi
+                    exit "${rc}"
+                  }
+                  trap 'on_exit' EXIT
+
+                  step "Instalando dependencias"
+                  apk add --no-cache netcat-openbsd coreutils git ca-certificates >/dev/null
+
+                  step "Preparando rutas y nombres de salida"
+                  TS="$(date -u +%Y%m%dT%H%M%SZ)"
+                  OUTPUT_DIR="/tmp/results/latency-np"
+                  RUN_FILE="${OUTPUT_DIR}/run_latency_np_${CNI_NAME}_${NP_CASE}_${TS}.json"
+                  TMP_MS_FILE="${OUTPUT_DIR}/tcp_connect_${CNI_NAME}_${NP_CASE}_${TS}.ms"
+                  TARGET_HOST="iperf3-server-np.cni-np-test.svc.cluster.local"
+                  TARGET_PORT="5201"
+                  SAMPLES="30"
+                  SUCCESS_COUNT="0"
+                  TCP_STATUS="ok"
+                  TEST_TYPE="latency_tcp_connect"
+                  RETENTION_MAX_RUNS="5"
+                  SAMPLES_JSON="[]"
+
+                  mkdir -p "${OUTPUT_DIR}"
+                  : > "${TMP_MS_FILE}"
+
+                  step "Ejecutando muestreo de latencia TCP connect (NP: ${NP_CASE})"
+                  i="1"
+                  SAMPLES_JSON="["
+                  while [ "${i}" -le "${SAMPLES}" ]; do
+                    SAMPLE_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                    START_MS="$(date +%s%3N)"
+                    if nc -z -w 2 "${TARGET_HOST}" "${TARGET_PORT}" >/dev/null 2>&1; then
+                      END_MS="$(date +%s%3N)"
+                      LAT_MS="$((END_MS - START_MS))"
+                      SUCCESS_COUNT="$((SUCCESS_COUNT + 1))"
+                      echo "${LAT_MS}" >> "${TMP_MS_FILE}"
+                      SAMPLE_ITEM="{\"sample\":${i},\"timestamp_utc\":\"${SAMPLE_TS}\",\"status\":\"ok\",\"tcp_connect_ms\":${LAT_MS}}"
+                      log INFO "sample=${i} tcp_connect_ms=${LAT_MS}"
+                    else
+                      SAMPLE_ITEM="{\"sample\":${i},\"timestamp_utc\":\"${SAMPLE_TS}\",\"status\":\"fail\",\"tcp_connect_ms\":null}"
+                      log ERROR "sample=${i} tcp_connect_failed (NP puede estar bloqueando)"
+                    fi
+                    if [ "${i}" -gt "1" ]; then
+                      SAMPLES_JSON="${SAMPLES_JSON},"
+                    fi
+                    SAMPLES_JSON="${SAMPLES_JSON}${SAMPLE_ITEM}"
+                    i="$((i + 1))"
+                    sleep 1
+                  done
+                  SAMPLES_JSON="${SAMPLES_JSON}]"
+
+                  step "Parseando resultados de latencia"
+                  FAILED_COUNT="$((SAMPLES - SUCCESS_COUNT))"
+                  LOSS="$(awk -v total="${SAMPLES}" -v ok="${SUCCESS_COUNT}" 'BEGIN { printf "%.2f", ((total-ok)*100)/total }')"
+
+                  if [ "${SUCCESS_COUNT}" = "0" ]; then
+                    TCP_STATUS="unreachable"
+                    TCP_MIN_MS="null"
+                    TCP_AVG_MS="null"
+                    TCP_MAX_MS="null"
+                    TCP_MDEV_MS="null"
+                  else
+                    TCP_STATUS="ok"
+                    if [ "${FAILED_COUNT}" -gt "0" ]; then
+                      TCP_STATUS="degraded"
+                    fi
+                    TCP_MIN_MS="$(awk 'NR==1 || $1<min {min=$1} END {print min}' "${TMP_MS_FILE}")"
+                    TCP_AVG_MS="$(awk '{sum+=$1} END {printf "%.3f", sum/NR}' "${TMP_MS_FILE}")"
+                    TCP_MAX_MS="$(awk 'NR==1 || $1>max {max=$1} END {print max}' "${TMP_MS_FILE}")"
+                    TCP_MDEV_MS="$(awk '{x[NR]=$1;sum+=$1} END {avg=sum/NR; for(i=1;i<=NR;i++){d=x[i]-avg; ss+=d*d}; printf "%.3f", sqrt(ss/NR)}' "${TMP_MS_FILE}")"
+                  fi
+
+                  step "Generando JSON normalizado de corrida"
+                  cat > "${RUN_FILE}" <<EOF
+                  {
+                    "timestamp_utc": "${TS}",
+                    "benchmark_type": "${TEST_TYPE}",
+                    "cni_name": "${CNI_NAME}",
+                    "network_policy_case": "${NP_CASE}",
+                    "namespace": "cni-np-test",
+                    "source": "cronjob/latency-client-np",
+                    "measurement_human": {
+                      "objective": "Medir latencia TCP connect con Network Policy activa (caso: ${NP_CASE})",
+                      "what_is_measured": "min/avg/max/mdev tcp_connect_ms y porcentaje de fallas",
+                      "traffic_profile": "30 intentos, timeout 2s, intervalo 1s",
+                      "target": "${TARGET_HOST}:${TARGET_PORT}",
+                      "decision_usage": "Calcular overhead de latencia con NP vs baseline"
+                    },
+                    "target_host": "${TARGET_HOST}",
+                    "target_port": ${TARGET_PORT},
+                    "tcp_status": "${TCP_STATUS}",
+                    "samples_attempted": ${SAMPLES},
+                    "samples_succeeded": ${SUCCESS_COUNT},
+                    "samples_failed": ${FAILED_COUNT},
+                    "connect_failure_percent": ${LOSS},
+                    "tcp_connect_min_ms": ${TCP_MIN_MS},
+                    "tcp_connect_avg_ms": ${TCP_AVG_MS},
+                    "tcp_connect_max_ms": ${TCP_MAX_MS},
+                    "tcp_connect_mdev_ms": ${TCP_MDEV_MS},
+                    "samples": ${SAMPLES_JSON}
+                  }
+                  EOF
+
+                  step "Configurando autenticacion Git"
+                  export GIT_TERMINAL_PROMPT=0
+                  export GIT_ASKPASS=/tmp/git-askpass.sh
+                  cat > "${GIT_ASKPASS}" <<'EOF'
+                  #!/bin/sh
+                  case "$1" in
+                    *Username*) echo "$GIT_USER" ;;
+                    *Password*) echo "$GIT_TOKEN" ;;
+                  esac
+                  EOF
+                  chmod 700 "${GIT_ASKPASS}"
+
+                  step "Clonando repositorio de resultados"
+                  rm -rf /tmp/repo
+                  git clone --depth 1 --branch "${GIT_BRANCH}" "${GIT_REPO_URL}" /tmp/repo
+
+                  step "Copiando artifacts al repositorio"
+                  DEST_DIR="/tmp/repo/${GIT_RESULTS_PATH}/${CNI_NAME}/with_network_policy/${NP_CASE}/${TEST_TYPE}"
+                  mkdir -p "${DEST_DIR}"
+                  cp "${RUN_FILE}" "${DEST_DIR}/run_${TS}.json"
+
+                  step "Aplicando retencion maxima de ${RETENTION_MAX_RUNS} corridas"
+                  cd "${DEST_DIR}"
+                  ls -1t run_*.json 2>/dev/null | awk "NR>${RETENTION_MAX_RUNS}" | xargs -r rm -f
+
+                  step "Commit y push de resultados"
+                  cd /tmp/repo
+                  git config user.name "${GIT_AUTHOR_NAME}"
+                  git config user.email "${GIT_AUTHOR_EMAIL}"
+                  git add "${GIT_RESULTS_PATH}/${CNI_NAME}/with_network_policy/${NP_CASE}/${TEST_TYPE}"
+                  git commit -m "results(np-latency): ${CNI_NAME}/${NP_CASE} ${TS} (max5)" || true
+                  git push origin "${GIT_BRANCH}"
+              env:
+                - name: GIT_REPO_URL
+                  valueFrom:
+                    configMapKeyRef:
+                      name: cni-np-results-git-config
+                      key: GIT_REPO_URL
+                - name: GIT_BRANCH
+                  valueFrom:
+                    configMapKeyRef:
+                      name: cni-np-results-git-config
+                      key: GIT_BRANCH
+                - name: GIT_RESULTS_PATH
+                  valueFrom:
+                    configMapKeyRef:
+                      name: cni-np-results-git-config
+                      key: GIT_RESULTS_PATH
+                - name: GIT_AUTHOR_NAME
+                  valueFrom:
+                    configMapKeyRef:
+                      name: cni-np-results-git-config
+                      key: GIT_AUTHOR_NAME
+                - name: GIT_AUTHOR_EMAIL
+                  valueFrom:
+                    configMapKeyRef:
+                      name: cni-np-results-git-config
+                      key: GIT_AUTHOR_EMAIL
+                - name: CNI_NAME
+                  valueFrom:
+                    configMapKeyRef:
+                      name: cni-np-results-git-config
+                      key: CNI_NAME
+                - name: NP_CASE
+                  valueFrom:
+                    configMapKeyRef:
+                      name: cni-np-results-git-config
+                      key: NP_CASE
+                - name: GIT_USER
+                  valueFrom:
+                    secretKeyRef:
+                      name: cni-results-git-credentials
+                      key: GIT_USER
+                - name: GIT_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: cni-results-git-credentials
+                      key: GIT_TOKEN
+                - name: DEBUG_HOLD_SECONDS
+                  value: "600"
+              resources:
+                requests:
+                  cpu: "100m"
+                  memory: "64Mi"
+                limits:
+                  cpu: "500m"
+                  memory: "128Mi"

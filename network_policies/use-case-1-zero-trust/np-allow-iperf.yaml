@@ -1,0 +1,83 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Zero Trust – Excepciones de Benchmark
+#
+# Permite el mínimo necesario para que los CronJobs de medición funcionen:
+#   1. Ingress al servidor iperf desde el cliente de benchmark
+#   2. Egress del cliente al servidor iperf (puerto 5201)
+#   3. Egress del cliente a DNS (kube-system puerto 53 UDP/TCP)
+#   4. Egress del cliente a internet HTTPS 443 (para git push de resultados)
+#
+# Validación funcional (ejecutar manualmente desde un pod de diagnóstico):
+#   ✅ DEBE PASAR: kubectl exec <iperf-client-pod> -- nc -vz iperf3-server-np 5201
+#   ❌ DEBE FALLAR: kubectl exec <demo-frontend-pod> -- nc -vz demo-database 80
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Permite que el servidor iperf reciba conexiones del cliente benchmark
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-iperf-server-ingress
+  namespace: cni-np-test
+  labels:
+    use-case: zero-trust
+    app.kubernetes.io/part-of: cni-np-test
+spec:
+  podSelector:
+    matchLabels:
+      app: iperf3-server-np
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              role: benchmark-client
+      ports:
+        - protocol: TCP
+          port: 5201
+---
+# Permite al cliente benchmark salir hacia iperf, DNS e internet para git push
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-benchmark-client-egress
+  namespace: cni-np-test
+  labels:
+    use-case: zero-trust
+    app.kubernetes.io/part-of: cni-np-test
+spec:
+  podSelector:
+    matchLabels:
+      role: benchmark-client
+  policyTypes:
+    - Egress
+  egress:
+    # Tráfico al servidor iperf en el mismo namespace
+    - to:
+        - podSelector:
+            matchLabels:
+              app: iperf3-server-np
+      ports:
+        - protocol: TCP
+          port: 5201
+    # DNS interno vía CoreDNS en kube-system
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # HTTPS hacia internet para git push de resultados a GitHub
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443

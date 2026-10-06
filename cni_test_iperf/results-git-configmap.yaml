@@ -11,7 +11,10 @@ metadata:
 data:
   # URL HTTPS del repositorio de resultados (sin credenciales)
   GIT_REPO_URL: "https://github.com/DuwanSierra/K8S-CNI-Results.git"
-  # Rama donde se almacenarán los resultados
+  # Rama donde se almacenarán los resultados. Puede ser cualquier rama
+  # (ej. "results-calico"); si no existe en el remoto, el job la crea a
+  # partir de la rama por defecto en el primer push. Se puede sobreescribir
+  # por CNI desde overlays/cni/<cni>/kustomization.yaml.
   GIT_BRANCH: "main"
   # Ruta base dentro del repo destino
   GIT_RESULTS_PATH: "results/cni-benchmarks"

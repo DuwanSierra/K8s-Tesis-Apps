@@ -216,7 +216,19 @@ spec:
 
                   step "Clonando repositorio de resultados"
                   rm -rf /tmp/repo
-                  git clone --depth 1 --branch "${GIT_BRANCH}" "${GIT_REPO_URL}" /tmp/repo
+                  # Si la rama destino no existe en el remoto, se crea a partir de la rama por defecto
+                  LS_RC=0
+                  git ls-remote --exit-code --heads "${GIT_REPO_URL}" "${GIT_BRANCH}" >/dev/null 2>&1 || LS_RC=$?
+                  if [ "${LS_RC}" -eq 0 ]; then
+                    git clone --depth 1 --branch "${GIT_BRANCH}" "${GIT_REPO_URL}" /tmp/repo
+                  elif [ "${LS_RC}" -eq 2 ]; then
+                    echo "Rama ${GIT_BRANCH} no existe en remoto; se creara desde la rama por defecto"
+                    git clone --depth 1 "${GIT_REPO_URL}" /tmp/repo
+                    git -C /tmp/repo checkout -b "${GIT_BRANCH}"
+                  else
+                    echo "ERROR: no se pudo consultar ${GIT_REPO_URL} (rc=${LS_RC})"
+                    exit 1
+                  fi
 
                   step "Copiando artifacts al repositorio"
                   DEST_DIR="/tmp/repo/${GIT_RESULTS_PATH}/${CNI_NAME}/with_network_policy/${NP_CASE}/${TEST_TYPE}"
@@ -233,7 +245,7 @@ spec:
                   git config user.email "${GIT_AUTHOR_EMAIL}"
                   git add "${GIT_RESULTS_PATH}/${CNI_NAME}/with_network_policy/${NP_CASE}/${TEST_TYPE}"
                   git commit -m "results(np-latency): ${CNI_NAME}/${NP_CASE} ${TS} (max5)" || true
-                  git push origin "${GIT_BRANCH}"
+                  git push origin "HEAD:refs/heads/${GIT_BRANCH}"
               env:
                 - name: GIT_REPO_URL
                   valueFrom:

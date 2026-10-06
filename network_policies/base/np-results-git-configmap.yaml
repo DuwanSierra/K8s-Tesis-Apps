@@ -10,6 +10,7 @@ metadata:
     component: network-policy-benchmark
 data:
   GIT_REPO_URL: "https://github.com/DuwanSierra/K8S-CNI-Results.git"
+  # Rama destino; si no existe en el remoto se crea en el primer push
   GIT_BRANCH: "main"
   GIT_RESULTS_PATH: "results/cni-benchmarks"
   # CNI_NAME y NP_CASE son sobreescritos por el overlay correspondiente

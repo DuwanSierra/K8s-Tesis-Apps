@@ -327,7 +327,19 @@ spec:
 
                   step "Clonando repositorio destino"
                   rm -rf /tmp/repo
-                  git clone --depth 1 --branch "${GIT_BRANCH}" "${GIT_REPO_URL}" /tmp/repo
+                  # Si la rama destino no existe en el remoto, se crea a partir de la rama por defecto
+                  LS_RC=0
+                  git ls-remote --exit-code --heads "${GIT_REPO_URL}" "${GIT_BRANCH}" >/dev/null 2>&1 || LS_RC=$?
+                  if [ "${LS_RC}" -eq 0 ]; then
+                    git clone --depth 1 --branch "${GIT_BRANCH}" "${GIT_REPO_URL}" /tmp/repo
+                  elif [ "${LS_RC}" -eq 2 ]; then
+                    echo "Rama ${GIT_BRANCH} no existe en remoto; se creara desde la rama por defecto"
+                    git clone --depth 1 "${GIT_REPO_URL}" /tmp/repo
+                    git -C /tmp/repo checkout -b "${GIT_BRANCH}"
+                  else
+                    echo "ERROR: no se pudo consultar ${GIT_REPO_URL} (rc=${LS_RC})"
+                    exit 1
+                  fi
 
                   step "Copiando exportacion ordenada por carpetas"
                   DEST_DIR="/tmp/repo/${GIT_RESULTS_PATH}/${CNI_NAME}/${RESOURCE_RESULTS_SUBPATH}/${TS}"
@@ -371,7 +383,7 @@ spec:
                   git config user.email "${GIT_AUTHOR_EMAIL}"
                   git add "${GIT_RESULTS_PATH}/${CNI_NAME}/${RESOURCE_RESULTS_SUBPATH}"
                   git commit -m "results(resources): ${CNI_NAME} ${TS} window=${EXPORT_WINDOW_MINUTES}m" || true
-                  git push origin "${GIT_BRANCH}"
+                  git push origin "HEAD:refs/heads/${GIT_BRANCH}"
               env:
                 - name: PROMETHEUS_URL
                   valueFrom:
